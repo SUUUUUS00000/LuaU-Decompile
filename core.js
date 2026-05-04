@@ -24,7 +24,7 @@ function parseproto(r, strings, version) {
         else if (type === 4) {
             let id = r.readuint32();
             let count = id >>> 30;
-            let arr = [];
+            let arr =[];
             let getval = (idx) => { let c = consts[idx]; return c ? (c.t === 'str' ? c.v : c.v) : ""; };
             if (count > 0) arr.push(getval((id >> 20) & 1023));
             if (count > 1) arr.push(getval((id >> 10) & 1023));
@@ -45,7 +45,7 @@ function parseproto(r, strings, version) {
     if (r.readbyte() === 1) {
         let linegap = r.readbyte();
         let intervals = ((instrcount - 1) >> linegap) + 1;
-        r.offset += instrcount + (intervals * 4);
+        r.offset += instrcount + (intervals * 8);
     }
     let locvars = [];
     let upvalues =[];
@@ -84,11 +84,21 @@ function lift(p, allprotos, indnt) {
     let regs = new Array(256).fill("nil");
     let pc = 0;
     let endScopes = {};
+    
+    let getVarName = (reg) => {
+        if (p.locvars) {
+            let loc = p.locvars.find(v => v.reg === reg && v.startpc <= pc && v.endpc >= pc);
+            if (loc) return loc.name;
+        }
+        return `v${reg}`;
+    };
+
     let push = (str) => { lines.push("    ".repeat(indnt) + str); };
+
     while (pc < p.instrs.length) {
         if (endScopes[pc]) {
             indnt = Math.max(0, indnt - endScopes[pc]);
-            for(let i=0; i<endScopes[pc]; i++) push("end");
+            for(let i = 0; i < endScopes[pc]; i++) push("end");
         }
         let raw = p.instrs[pc];
         let op = raw & 0xFF;
@@ -98,6 +108,7 @@ function lift(p, allprotos, indnt) {
         let c = (raw >>> 24) & 0xFF;
         let bx = (raw >>> 16) & 0xFFFF;
         let sbx = bx - 32768;
+        
         try {
             if (opname === "LOADNIL") regs[a] = "nil";
             else if (opname === "LOADB") { regs[a] = b === 1 ? "true" : "false"; if (c > 0) pc++; }
@@ -208,25 +219,47 @@ function lift(p, allprotos, indnt) {
             else if (opname === "MINUS") regs[a] = `-${regs[b] || "nil"}`;
             else if (opname === "LENGTH") regs[a] = `#${regs[b] || "nil"}`;
             else if (opname === "CONCAT") {
-                let r = [];
+                let r =[];
                 for (let i = b; i <= c; i++) r.push(regs[i] || '""');
                 regs[a] = r.join(" .. ");
             }
             else if (opname === "GETUPVAL") regs[a] = p.upvalues[b] || `upval_${b}`;
             else if (opname === "SETUPVAL") push(`${p.upvalues[b] || `upval_${b}`} = ${regs[a] || "nil"}`);
-            else if (opname === "NEWCLOSURE") regs[a] = allprotos[bx] ? allprotos[bx].code : "function() end";
-            else if (opname === "DUPCLOSURE") regs[a] = allprotos[p.consts[bx].id] ? allprotos[p.consts[bx].id].code : "function() end";
-            else if (opname === "NEWTABLE" || opname === "DUPTABLE") { regs[a] = "{}"; if (opname === "NEWTABLE") pc++; }
-            else if (opname === "SETLIST") { pc++; }
+            else if (opname === "NEWCLOSURE" || opname === "DUPCLOSURE") {
+                let funcName = getVarName(a);
+                let protoIdx = opname === "NEWCLOSURE" ? bx : p.consts[bx].id;
+                let code = allprotos[protoIdx] ? allprotos[protoIdx].code : "function() end";
+                push(`local ${funcName} = ${code}`);
+                regs[a] = funcName;
+            }
+            else if (opname === "NEWTABLE" || opname === "DUPTABLE") {
+                let tblName = getVarName(a);
+                push(`local ${tblName} = {}`);
+                regs[a] = tblName;
+                if (opname === "NEWTABLE") pc++; 
+            }
+            else if (opname === "SETLIST") {
+                let aux = p.instrs[++pc];
+                let count = c - 1;
+                let startIdx = aux; 
+                if (count > 0) {
+                    for (let i = 0; i < count; i++) {
+                        push(`${regs[a]}[${startIdx + i}] = ${regs[b + i] || "nil"}`);
+                    }
+                }
+            }
             else if (opname === "GETVARARGS") regs[a] = "...";
             else if (opname === "FORNPREP") {
-                push(`for v${a} = ${regs[a] || "nil"}, ${regs[a+1] || "nil"}, ${regs[a+2] || "nil"} do`);
+                let loopVar = getVarName(a + 3);
+                push(`for ${loopVar} = ${regs[a] || "nil"}, ${regs[a+1] || "nil"}, ${regs[a+2] || "nil"} do`);
                 let target = pc + sbx + 1;
                 endScopes[target] = (endScopes[target] || 0) + 1;
                 indnt++;
             }
             else if (opname === "FORGPREP" || opname === "FORGPREP_INEXT" || opname === "FORGPREP_NEXT") {
-                push(`for v${a+3}, v${a+4} in ${regs[a] || "nil"} do`);
+                let var1 = getVarName(a + 3);
+                let var2 = getVarName(a + 4);
+                push(`for ${var1}, ${var2} in ${regs[a] || "nil"} do`);
                 let target = pc + sbx + 1;
                 endScopes[target] = (endScopes[target] || 0) + 1;
                 indnt++;
