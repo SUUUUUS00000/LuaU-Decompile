@@ -27,7 +27,7 @@ function parseproto(r, strings, version) {
         else if (type === 4) {
             let id = r.readuint32();
             let count = id >>> 30;
-            let arr = [];
+            let arr =[];
             let getval = (idx) => { let c = consts[idx]; return c ? (c.t === 'str' ? c.v : c.v) : ""; };
             if (count > 0) arr.push(getval((id >> 20) & 1023));
             if (count > 1) arr.push(getval((id >> 10) & 1023));
@@ -50,11 +50,11 @@ function parseproto(r, strings, version) {
     
     if (r.readbyte() === 1) {
         let linegap = r.readbyte();
-        let intervals = ((instrcount - 1) >> linegap) + 1;
+        let intervals = instrcount > 0 ? ((instrcount - 1) >> linegap) + 1 : 0;
         r.offset += instrcount + (intervals * 8);
     }
     
-    let locvars = [];
+    let locvars =[];
     let upvalues =[];
     if (r.readbyte() === 1) {
         let locs = r.readvarint();
@@ -258,7 +258,7 @@ function lift(p, allprotos, indnt) {
             }
             else if (opname === "GETVARARGS") regs[a] = "...";
             else if (opname === "FORNPREP") {
-                let loopVar = getVarName(a + 2);
+                let loopVar = getVarName(a + 3);
                 push(`for ${loopVar} = ${regs[a] || "nil"}, ${regs[a+1] || "nil"}, ${regs[a+2] || "nil"} do`);
                 let target = pc + sbx + 1;
                 endScopes[target] = (endScopes[target] || 0) + 1;
