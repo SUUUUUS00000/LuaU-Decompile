@@ -9,14 +9,14 @@ app.post('/decompile', (req, res) => {
         let base64script = req.body.script;
         
         if (!base64script) {
-            return res.status(400).send("error empty script");
+            return res.status(400).send("-- error: empty script");
         }
 
         let result = core.process(base64script);
         res.set('content-type', 'text/plain');
         res.send(result);
     } catch (ex) {
-        res.status(500).send("error internal process failed");
+        res.status(500).send(`-- [MEGGD Server Crash]\n-- Error: ${ex.message}\n-- StackTrace:\n-- ${ex.stack.replace(/\n/g, '\n-- ')}`);
     }
 });
 
