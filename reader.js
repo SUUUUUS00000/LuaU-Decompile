@@ -16,6 +16,12 @@ class bufferreader {
         this.offset += 4;
         return val;
     }
+    readuint32() {
+        if (this.offset + 4 > this.length) return 0;
+        let val = this.buffer.readUInt32LE(this.offset);
+        this.offset += 4;
+        return val;
+    }
     readstring(len) {
         if (this.offset + len > this.length) len = this.length - this.offset;
         let str = this.buffer.toString('utf8', this.offset, this.offset + len);
