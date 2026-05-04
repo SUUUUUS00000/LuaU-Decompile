@@ -26,33 +26,33 @@ function parseproto(r, strings, version) {
     for (let i = 0; i < constcount; i++) {
         let type = r.readbyte();
         if (type === 0) {
-            consts.push(null);
+            consts.push("nil");
         } else if (type === 1) {
-            consts.push(r.readbyte() === 1);
+            consts.push(r.readbyte() === 1 ? "true" : "false");
         } else if (type === 2) {
             let num = r.buffer.readDoubleLE(r.offset);
             r.offset += 8;
             consts.push(num);
         } else if (type === 3) {
             let id = r.readvarint();
-            consts.push(strings[id - 1]);
+            consts.push(`"${strings[id - 1]}"`);
         } else if (type === 4) {
             let id = r.readint32();
-            consts.push(id);
+            consts.push(`[Import ID: ${id}]`);
         } else if (type === 5) {
             let size = r.readvarint();
             for (let j = 0; j < size; j++) {
                 r.readvarint();
             }
-            consts.push("table");
+            consts.push("{table}");
         } else if (type === 6) {
             let id = r.readvarint();
-            consts.push("closure");
+            consts.push(`[Closure ID: ${id}]`);
         } else if (type === 7) {
             r.offset += 16;
-            consts.push("vector");
+            consts.push("Vector3.new(...)");
         } else {
-            consts.push("unknown");
+            consts.push(`[Unknown Constant Type: ${type}]`);
         }
     }
 
@@ -70,22 +70,15 @@ function parseproto(r, strings, version) {
     if (haslineinfo === 1) {
         let linegaplog2 = r.readbyte();
         let intervals = ((instrcount - 1) >> linegaplog2) + 1;
-        for (let i = 0; i < instrcount; i++) {
-            r.readbyte();
-        }
-        for (let i = 0; i < intervals; i++) {
-            r.readint32();
-        }
+        r.offset += instrcount;
+        r.offset += intervals * 4;
     }
 
     let hasdebug = r.readbyte();
     if (hasdebug === 1) {
         let loccount = r.readvarint();
         for (let i = 0; i < loccount; i++) {
-            r.readvarint();
-            r.readvarint();
-            r.readvarint();
-            r.readbyte();
+            r.readvarint(); r.readvarint(); r.readvarint(); r.readbyte();
         }
         let upvcount = r.readvarint();
         for (let i = 0; i < upvcount; i++) {
@@ -93,16 +86,7 @@ function parseproto(r, strings, version) {
         }
     }
 
-    return {
-        maxstacksize,
-        numparams,
-        numupvalues,
-        isvararg,
-        instrs,
-        consts,
-        protos,
-        protoname
-    };
+    return { maxstacksize, numparams, numupvalues, isvararg, instrs, consts, protos, protoname };
 }
 
 function process(base64str) {
@@ -110,14 +94,10 @@ function process(base64str) {
     let r = new bufferreader(buf);
 
     let version = r.readbyte();
-    if (version === 0) {
-        return "error invalid bytecode";
-    }
+    if (version === 0) return "-- error: invalid bytecode (version 0)";
 
     let typesversion = 0;
-    if (version >= 4) {
-        typesversion = r.readbyte();
-    }
+    if (version >= 4) typesversion = r.readbyte();
 
     let stringcount = r.readvarint();
     let strings =[];
@@ -142,7 +122,35 @@ function process(base64str) {
 
     let mainindex = r.readvarint();
     
-    return "debug successfully parsed " + allprotos.length + " prototypes";
+    let output = `-- MEGGD Engine v1.0\n-- Luau Bytecode Version: ${version}\n-- Parsed Prototypes: ${allprotos.length}\n\n`;
+    
+    for (let i = 0; i < allprotos.length; i++) {
+        let p = allprotos[i];
+        output += `function ${p.protoname}() -- [Prototype ${i}]\n`;
+        
+        output += `  -- Constants (${p.consts.length}):\n`;
+        for (let c = 0; c < p.consts.length; c++) {
+            output += `  -- K[${c}] = ${p.consts[c]}\n`;
+        }
+        
+        output += `\n  -- Instructions (${p.instrs.length}):\n`;
+        for (let inst = 0; inst < p.instrs.length; inst++) {
+            let raw = p.instrs[inst];
+            let op = raw & 0xFF;
+            
+            let opname = opcodes[op] || `UNKNOWN_OP_${op}`;
+            
+            let A = (raw >> 8) & 0xFF;
+            let B = (raw >> 16) & 0xFF;
+            let C = (raw >> 24) & 0xFF;
+            let Bx = (raw >> 16) & 0xFFFF;
+            
+            output += `  [${inst}] ${opname} \tA: ${A} \tB: ${B} \tC: ${C} \tBx: ${Bx}\n`;
+        }
+        output += `end\n\n`;
+    }
+
+    return output;
 }
 
 module.exports = { process };
