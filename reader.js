@@ -10,12 +10,6 @@ class bufferreader {
         this.offset += 1;
         return val;
     }
-    readint32() {
-        if (this.offset + 4 > this.length) return 0;
-        let val = this.buffer.readInt32LE(this.offset);
-        this.offset += 4;
-        return val;
-    }
     readuint32() {
         if (this.offset + 4 > this.length) return 0;
         let val = this.buffer.readUInt32LE(this.offset);
@@ -34,11 +28,11 @@ class bufferreader {
         let byte;
         do {
             byte = this.readbyte();
-            result |= (byte & 127) << shift;
+            result += (byte & 127) * Math.pow(2, shift);
             shift += 7;
             if (shift > 35) break; 
         } while (byte & 128);
-        return result >>> 0;
+        return result;
     }
 }
 module.exports = bufferreader;
