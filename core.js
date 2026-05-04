@@ -6,13 +6,16 @@ function parseproto(r, strings, version) {
     let numparams = r.readbyte();
     let numupvalues = r.readbyte();
     let isvararg = r.readbyte();
+    
     if (version >= 4) {
         r.readbyte();
         r.offset += r.readvarint();
     }
+    
     let instrcount = r.readvarint();
     let instrs =[];
     for (let i = 0; i < instrcount; i++) instrs.push(r.readuint32());
+    
     let constcount = r.readvarint();
     let consts =[];
     for (let i = 0; i < constcount; i++) {
@@ -24,29 +27,33 @@ function parseproto(r, strings, version) {
         else if (type === 4) {
             let id = r.readuint32();
             let count = id >>> 30;
-            let arr =[];
+            let arr = [];
             let getval = (idx) => { let c = consts[idx]; return c ? (c.t === 'str' ? c.v : c.v) : ""; };
             if (count > 0) arr.push(getval((id >> 20) & 1023));
             if (count > 1) arr.push(getval((id >> 10) & 1023));
             if (count > 2) arr.push(getval(id & 1023));
             consts.push({ t: 'import', v: arr.join(".") });
         }
-        else if (type === 5) { let sz = r.readvarint(); for(let j=0; j<sz; j++) r.readvarint(); consts.push({ t: 'table', v: '{}' }); }
+        else if (type === 5) { let sz = r.readvarint(); for(let j = 0; j < sz; j++) r.readvarint(); consts.push({ t: 'table', v: '{}' }); }
         else if (type === 6) consts.push({ t: 'closure', id: r.readvarint() });
         else if (type === 7) { r.offset += 16; consts.push({ t: 'vector', v: 'Vector3.new()' }); }
         else consts.push({ t: 'unk', v: 'unknown' });
     }
+    
     let protocount = r.readvarint();
     let protos =[];
     for (let i = 0; i < protocount; i++) protos.push(r.readvarint());
+    
     let linedefined = r.readvarint();
     let nameid = r.readvarint();
     let protoname = nameid > 0 ? strings[nameid - 1] : "anonymous";
+    
     if (r.readbyte() === 1) {
         let linegap = r.readbyte();
         let intervals = ((instrcount - 1) >> linegap) + 1;
         r.offset += instrcount + (intervals * 8);
     }
+    
     let locvars = [];
     let upvalues =[];
     if (r.readbyte() === 1) {
@@ -64,6 +71,7 @@ function parseproto(r, strings, version) {
             upvalues.push(strings[n_id - 1] || "upval_" + i);
         }
     }
+    
     return { numparams, isvararg, instrs, consts, protos, protoname, locvars, upvalues };
 }
 
@@ -250,7 +258,7 @@ function lift(p, allprotos, indnt) {
             }
             else if (opname === "GETVARARGS") regs[a] = "...";
             else if (opname === "FORNPREP") {
-                let loopVar = getVarName(a + 3);
+                let loopVar = getVarName(a + 2);
                 push(`for ${loopVar} = ${regs[a] || "nil"}, ${regs[a+1] || "nil"}, ${regs[a+2] || "nil"} do`);
                 let target = pc + sbx + 1;
                 endScopes[target] = (endScopes[target] || 0) + 1;
@@ -278,21 +286,21 @@ function process(base64str) {
     let buf = Buffer.from(base64str, 'base64');
     let r = new bufferreader(buf);
     let version = r.readbyte();
+    
     if (version < 3 || version > 7) return "error invalid bytecode";
-    let typesVersion = 0;
-    if (version >= 4) typesVersion = r.readbyte();
+    if (version >= 4) r.readbyte();
+    
     let stringcount = r.readvarint();
     let strings =[];
     for (let i = 0; i < stringcount; i++) strings.push(r.readstring(r.readvarint()));
-    if (typesVersion >= 3) {
-        let index = r.readbyte();
-        while (index !== 0) { r.readvarint(); index = r.readbyte(); }
-    }
+    
     let protocount = r.readvarint();
     let allprotos =[];
     for (let i = 0; i < protocount; i++) allprotos.push(parseproto(r, strings, version));
+    
     let mainindex = r.readvarint();
     if (!allprotos[mainindex]) return "error missing main proto";
+    
     for (let i = allprotos.length - 1; i >= 0; i--) {
         let p = allprotos[i];
         let body = lift(p, allprotos, 1);
@@ -308,6 +316,7 @@ function process(base64str) {
         if (p.isvararg) args.push("...");
         p.code = `function(${args.join(", ")})\n${body}\nend`;
     }
+    
     return lift(allprotos[mainindex], allprotos, 0);
 }
 
