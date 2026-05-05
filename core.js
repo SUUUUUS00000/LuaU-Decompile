@@ -11,12 +11,21 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
         let numupvalues = r.readbyte();
         let isvararg = r.readbyte();
         
+        if (trace) trace.push(`[Proto ${protoIdx}] stack:${maxstacksize} params:${numparams} upvals:${numupvalues} vararg:${isvararg}`);
+        
         if (version >= 4) {
             state = "typeinfo";
             let typeinfoFlags = r.readbyte();
+            if (trace) trace.push(`[Proto ${protoIdx}] typeinfoFlags:${typeinfoFlags}`);
             if (typeinfoFlags > 0) {
                 let typesize = r.readvarint();
+                if (trace) trace.push(`[Proto ${protoIdx}] typesize:${typesize}`);
                 r.offset += typesize;
+            }
+            if (version >= 7) {
+                let unk1 = r.readvarint();
+                let unk2 = r.readvarint();
+                if (trace) trace.push(`[Proto ${protoIdx}] v7_extravars: ${unk1}, ${unk2}`);
             }
         }
 
@@ -26,6 +35,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
         if (layout === "standard") {
             state = "instrcount";
             instrcount = r.readvarint();
+            if (trace) trace.push(`[Proto ${protoIdx}] instrcount:${instrcount}`);
             for (let i = 0; i < instrcount; i++) {
                 instrs.push(r.readuint32());
             }
@@ -33,6 +43,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
         
         state = "constcount";
         let constcount = r.readvarint();
+        if (trace) trace.push(`[Proto ${protoIdx}] constcount:${constcount}`);
         let consts =[];
         for (let i = 0; i < constcount; i++) {
             let type = r.readbyte();
@@ -57,11 +68,12 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
             }
             else if (type === 6) consts.push({ t: 'closure', id: r.readvarint() });
             else if (type === 7) { r.offset += 16; consts.push({ t: 'vector', v: 'Vector3.new()' }); }
-            else throw new Error(`Unknown const type ${type} at idx ${i}`);
+            else throw new Error(`Unknown const type ${type} at idx ${i} (offset: ${r.offset})`);
         }
         
         state = "protocount";
         let protocount = r.readvarint();
+        if (trace) trace.push(`[Proto ${protoIdx}] subprotocount:${protocount}`);
         let protos =[];
         for (let i = 0; i < protocount; i++) {
             protos.push(r.readvarint());
@@ -74,6 +86,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
         
         state = "lineinfo";
         let hasLineInfo = r.readbyte();
+        if (trace) trace.push(`[Proto ${protoIdx}] hasLineInfo:${hasLineInfo}`);
         let linegap = 0;
         if (hasLineInfo !== 0) {
             linegap = r.readbyte();
@@ -86,7 +99,8 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
         
         state = "debuginfo";
         let hasDebugInfo = r.readbyte();
-        let locvars =[];
+        if (trace) trace.push(`[Proto ${protoIdx}] hasDebugInfo:${hasDebugInfo}`);
+        let locvars = [];
         let upvalues =[];
         if (hasDebugInfo !== 0) {
             let locs = r.readvarint();
@@ -107,6 +121,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
         if (layout === "modified") {
             state = "instrcount";
             instrcount = r.readvarint();
+            if (trace) trace.push(`[Proto ${protoIdx}] delayed instrcount:${instrcount}`);
             for (let i = 0; i < instrcount; i++) {
                 instrs.push(r.readuint32());
             }
@@ -342,19 +357,28 @@ function process(base64str) {
     try {
         buf = Buffer.from(base64str, 'base64');
     } catch (e) {
-        return `--[DECOMPILER CRASH]\n-- Reason: Failed to decode base64 buffer\n-- Message: ${e.message}`;
+        return `-- [DECOMPILER CRASH]\n-- Reason: Failed to decode base64 buffer\n-- Message: ${e.message}`;
     }
     
     let r = new bufferreader(buf);
-    let trace = [];
+    let trace =[];
+    let backtrackErrors = [];
     
     let dumpError = (msg) => {
         let err = `--[DECOMPILER CRASH]\n-- Reason: ${msg}\n-- Buffer Length: ${r.length}\n-- Current Offset: ${r.offset}\n-- Execution Trace:\n`;
-        for (let i = Math.max(0, trace.length - 30); i < trace.length; i++) {
+        for (let i = Math.max(0, trace.length - 40); i < trace.length; i++) {
             err += `-- > ${trace[i]}\n`;
         }
+        
+        if (backtrackErrors.length > 0) {
+            err += `-- Backtrack Failures:\n`;
+            for (let be of backtrackErrors) {
+                err += `-- > ${be}\n`;
+            }
+        }
+
         let start = Math.max(0, r.offset - 64);
-        let end = Math.min(r.length, r.offset + 128);
+        let end = Math.min(r.length, r.offset + 1024);
         err += `-- Hex Dump (${start} to ${end}):\n`;
         let hexLines =[];
         let currentLine = "";
@@ -376,27 +400,35 @@ function process(base64str) {
     };
 
     try {
+        trace.push("Start reading bytecode");
         let version = r.readbyte();
+        trace.push(`Version: ${version}`);
+        
         if (version < 3 || version > 7) return dumpError(`Invalid bytecode version: ${version}`);
+        
         if (version >= 4) {
-            r.readbyte();
+            let t_ver = r.readbyte();
+            trace.push(`TypesVersion: ${t_ver}`);
         }
         
         let stringcount = r.readvarint();
+        trace.push(`String count: ${stringcount}`);
+        
         let strings =[];
         for (let i = 0; i < stringcount; i++) {
             let slen = r.readvarint();
             strings.push(r.readstring(slen));
         }
+        trace.push("Strings parsed successfully");
         
         let originalStringsLength = strings.length;
         let savedStringsOffset = r.offset;
         
         let found = false;
-        let allprotos = [];
+        let allprotos =[];
         let mainindex = 0;
 
-        for (let layout of["modified", "standard"]) {
+        for (let layout of ["standard", "modified"]) {
             for (let extraStrings = 0; extraStrings < 5; extraStrings++) {
                 r.offset = savedStringsOffset;
                 strings.length = originalStringsLength;
@@ -419,6 +451,7 @@ function process(base64str) {
                     for (let i = 0; i < protocount; i++) {
                         let p = parseproto(r, strings, version, i,[], layout);
                         if (!p.success) {
+                            backtrackErrors.push(`L:${layout} ES:${extraStrings} P:${i} FAILED at ${p.state}: ${p.error}`);
                             pSuccess = false;
                             break;
                         }
@@ -432,9 +465,13 @@ function process(base64str) {
                             mainindex = mIdx;
                             found = true;
                             break;
+                        } else {
+                            backtrackErrors.push(`L:${layout} ES:${extraStrings} FAILED: mIdx ${mIdx} out of bounds (protocount ${protocount})`);
                         }
                     }
-                } catch (e) {}
+                } catch (e) {
+                    backtrackErrors.push(`L:${layout} ES:${extraStrings} FAILED FATAL: ${e.message}`);
+                }
             }
             if (found) break;
         }
@@ -444,7 +481,7 @@ function process(base64str) {
             strings.length = originalStringsLength;
             let protocount = r.readvarint();
             for (let i = 0; i < protocount; i++) {
-                let p = parseproto(r, strings, version, i, trace, "modified");
+                let p = parseproto(r, strings, version, i, trace, "standard");
                 if (!p.success) {
                     return dumpError(`Proto [${i}] crash during: ${p.state}. Error: ${p.error}`);
                 }
