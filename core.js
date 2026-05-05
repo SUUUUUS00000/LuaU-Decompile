@@ -37,7 +37,7 @@ function formatK(k) {
     if (k.t === 'bool') return { type: "Literal", value: k.v ? "true" : "false" };
     if (k.t === 'closure') return { type: "Literal", value: `closure_${k.id}` };
     if (k.t === 'table') return { type: "Table" };
-    if (k.t === 'import') return { type: "Literal", value: k.v };
+    if (k.t === 'import') return { type: "Identifier", name: k.v };
     if (k.t === 'num') return { type: "Literal", value: k.v };
     return { type: "Literal", value: k.v !== undefined ? k.v : "nil" };
 }
@@ -197,34 +197,28 @@ function stringifyAST(node, ind) {
     return "";
 }
 
-function lift(p, allprotos, indnt, getProtoCode) {
-    if (!p || !p.instrs || p.instrs.length === 0) return "";
-    
-    let basicBlocks = new Set([0]);
-    for(let pc = 0; pc < p.instrs.length; pc++) {
+function lift(p, allprotos, getProtoCode) {
+    if (!p || !p.instrs || p.instrs.length === 0) return { type: "Block", body: [] };
+
+    let loopHeaders = {};
+    for (let pc = 0; pc < p.instrs.length; pc++) {
         let raw = p.instrs[pc];
         let op = raw & 0xFF;
         let opname = opcodes[op] || "UNKNOWN";
         let bx = (raw >>> 16) & 0xFFFF;
-        let sbx = bx; if (sbx >= 32768) sbx -= 65536;
-        let hasAux = aux_opcodes.has(opname);
-        
-        if (opname.startsWith("JUMP") || opname.startsWith("FOR")) {
-            let target = pc + sbx + 1;
-            if (opname === "JUMPX") target = pc + (raw >> 8) + 1;
-            if (opname === "JUMPBACK") target = pc - bx + 1;
-            basicBlocks.add(target);
-            basicBlocks.add(pc + (hasAux ? 2 : 1));
-        } else if (opname === "RETURN") {
-            if (pc + 1 < p.instrs.length) basicBlocks.add(pc + 1);
+        let sbx = bx >= 32768 ? bx - 65536 : bx;
+        if (opname === "JUMPBACK") loopHeaders[pc - bx + 1] = pc;
+        else if (opname === "JUMPX" || opname === "JUMP") {
+            let offset = opname === "JUMPX" ? (raw >> 8) : sbx;
+            if (offset < 0) loopHeaders[pc + offset + 1] = pc;
         }
-        if (hasAux) pc++;
+        if (aux_opcodes.has(opname)) pc++;
     }
 
-    let regs = new Array(256).fill(null);
     let definedVars = new Set();
+    let namecalls = {};
     let pc = 0;
-    
+
     let getVarName = (reg) => {
         if (p.locvars) {
             let loc = p.locvars.find(v => v.reg === reg && v.startpc <= pc && v.endpc >= pc);
@@ -233,38 +227,38 @@ function lift(p, allprotos, indnt, getProtoCode) {
         return `v${reg}`;
     };
 
-    for (let i = 0; i < p.numparams; i++) {
-        let name = getVarName(i);
-        regs[i] = { type: "Identifier", name: name };
-        definedVars.add(name);
-    }
+    for (let i = 0; i < p.numparams; i++) definedVars.add(getVarName(i));
 
-    let getR = (r) => regs[r] !== null ? regs[r] : { type: "Identifier", name: getVarName(r) };
+    let getR = (r) => ({ type: "Identifier", name: getVarName(r) });
 
     let astBody = [];
-    let scopeStack = [astBody];
-    let ends = {};
+    let scopeStack = [{ body: astBody, endPc: p.instrs.length, owner: null }];
 
     let pushNode = (node) => {
-        if (node) scopeStack[scopeStack.length - 1].push(node);
+        if (node) scopeStack[scopeStack.length - 1].body.push(node);
     };
 
     let assignVar = (reg, valNode) => {
         let varName = getVarName(reg);
-        if (definedVars.has(varName)) {
-            pushNode({ type: "Assignment", left: { type: "Identifier", name: varName }, right: valNode });
-        } else {
+        let leftNode = { type: "Identifier", name: varName };
+        if (!definedVars.has(varName)) {
             definedVars.add(varName);
-            pushNode({ type: "LocalAssignment", left: { type: "Identifier", name: varName }, right: valNode });
+            pushNode({ type: "LocalAssignment", left: leftNode, right: valNode });
+        } else {
+            pushNode({ type: "Assignment", left: leftNode, right: valNode });
         }
-        regs[reg] = { type: "Identifier", name: varName };
     };
 
     while (pc < p.instrs.length) {
-        if (ends[pc]) {
-            for(let i=0; i<ends[pc]; i++) {
-                if (scopeStack.length > 1) scopeStack.pop();
-            }
+        while (scopeStack.length > 1 && pc >= scopeStack[scopeStack.length - 1].endPc) {
+            scopeStack.pop();
+        }
+
+        if (loopHeaders[pc]) {
+            let loopBody = [];
+            let whileNode = { type: "While", cond: { type: "Literal", value: "true" }, body: { type: "Block", body: loopBody } };
+            pushNode(whileNode);
+            scopeStack.push({ body: loopBody, endPc: loopHeaders[pc] + 1, owner: whileNode });
         }
 
         let raw = p.instrs[pc];
@@ -274,8 +268,7 @@ function lift(p, allprotos, indnt, getProtoCode) {
         let b = (raw >>> 16) & 0xFF;
         let c = (raw >>> 24) & 0xFF;
         let bx = (raw >>> 16) & 0xFFFF;
-        let sbx = bx;
-        if (sbx >= 32768) sbx -= 65536;
+        let sbx = bx >= 32768 ? bx - 65536 : bx;
 
         let hasAux = aux_opcodes.has(opname);
         let aux = hasAux ? (p.instrs[pc + 1] || 0) : 0;
@@ -287,44 +280,36 @@ function lift(p, allprotos, indnt, getProtoCode) {
         }
 
         try {
-            if (opname === "LOADNIL") regs[a] = { type: "Literal", value: "nil" };
-            else if (opname === "LOADB") { 
-                regs[a] = { type: "Literal", value: b === 1 ? "true" : "false" }; 
-                if (c > 0) {
-                    let target = pc + c + 1;
-                    ends[target] = (ends[target] || 0) + 1;
-                }
-            }
-            else if (opname === "LOADN") regs[a] = { type: "Literal", value: sbx };
-            else if (opname === "LOADK") regs[a] = formatK(p.consts[bx]);
-            else if (opname === "LOADKX") regs[a] = formatK(auxVal);
-            else if (opname === "MOVE") regs[a] = getR(b);
-            else if (opname === "GETGLOBAL") regs[a] = { type: "Identifier", name: formatKVal(auxVal) };
+            if (opname === "LOADNIL") assignVar(a, { type: "Literal", value: "nil" });
+            else if (opname === "LOADB") assignVar(a, { type: "Literal", value: b === 1 ? "true" : "false" });
+            else if (opname === "LOADN") assignVar(a, { type: "Literal", value: sbx });
+            else if (opname === "LOADK") assignVar(a, formatK(p.consts[bx]));
+            else if (opname === "LOADKX") assignVar(a, formatK(auxVal));
+            else if (opname === "MOVE") assignVar(a, getR(b));
+            else if (opname === "GETGLOBAL") assignVar(a, { type: "Identifier", name: formatKVal(auxVal) });
             else if (opname === "SETGLOBAL") pushNode({ type: "Assignment", left: { type: "Identifier", name: formatKVal(auxVal) }, right: getR(a) });
-            else if (opname === "GETIMPORT") regs[a] = { type: "Identifier", name: formatKVal(auxVal) };
-            else if (opname === "GETTABLE") regs[a] = { type: "Index", obj: getR(b), prop: getR(c) };
-            else if (opname === "GETTABLEKS") regs[a] = { type: "IndexProp", obj: getR(b), prop: formatKVal(auxVal) };
-            else if (opname === "GETTABLEN") regs[a] = { type: "Index", obj: getR(b), prop: { type: "Literal", value: c + 1 } };
+            else if (opname === "GETIMPORT") assignVar(a, { type: "Identifier", name: formatKVal(auxVal) });
+            else if (opname === "GETTABLE") assignVar(a, { type: "Index", obj: getR(b), prop: getR(c) });
+            else if (opname === "GETTABLEKS") assignVar(a, { type: "IndexProp", obj: getR(b), prop: formatKVal(auxVal) });
+            else if (opname === "GETTABLEN") assignVar(a, { type: "Index", obj: getR(b), prop: { type: "Literal", value: c + 1 } });
             else if (opname === "SETTABLE") pushNode({ type: "Assignment", left: { type: "Index", obj: getR(b), prop: getR(c) }, right: getR(a) });
             else if (opname === "SETTABLEKS") pushNode({ type: "Assignment", left: { type: "IndexProp", obj: getR(b), prop: formatKVal(auxVal) }, right: getR(a) });
             else if (opname === "SETTABLEN") pushNode({ type: "Assignment", left: { type: "Index", obj: getR(b), prop: { type: "Literal", value: c + 1 } }, right: getR(a) });
             else if (opname === "NAMECALL") {
-                regs[a] = { m: true, obj: getR(b), func: formatKVal(auxVal) };
-                regs[a + 1] = getR(b);
+                namecalls[a] = { obj: getR(b), func: formatKVal(auxVal) };
             }
             else if (opname === "CALL") {
-                let f = regs[a];
+                let nc = namecalls[a];
                 let args = [];
-                if (b === 0) {
-                    args.push({ type: "Vararg" });
-                } else {
+                if (b === 0) args.push({ type: "Vararg" });
+                else {
                     let argcount = b - 1;
-                    let startIdx = (f && f.m) ? 2 : 1;
+                    let startIdx = nc ? 2 : 1;
                     for (let i = startIdx; i <= argcount; i++) args.push(getR(a + i));
                 }
-                let callNode;
-                if (f && f.m) callNode = { type: "Call", isMethod: true, func: f, args: args };
-                else callNode = { type: "Call", isMethod: false, func: f || { type: "Identifier", name: getVarName(a) }, args: args };
+                
+                let callNode = nc ? { type: "Call", isMethod: true, func: nc, args: args } : { type: "Call", isMethod: false, func: getR(a), args: args };
+                if (nc) delete namecalls[a];
                 
                 if (c - 1 === 0) pushNode({ type: "CallStatement", call: callNode }); 
                 else assignVar(a, callNode);
@@ -338,10 +323,16 @@ function lift(p, allprotos, indnt, getProtoCode) {
             }
             else if (opname === "JUMP" || opname === "JUMPX") {
                 let offset = opname === "JUMPX" ? (raw >> 8) : sbx;
-                if (offset < 0) pushNode({ type: "Break" });
-            }
-            else if (opname === "JUMPBACK") {
-                let offset = -bx;
+                let target = pc + offset + 1;
+                
+                let currScope = scopeStack[scopeStack.length - 1];
+                if (currScope.owner && currScope.owner.type === "If" && !currScope.owner.elseBody && (pc + 1 === currScope.endPc || pc + (hasAux?2:1) === currScope.endPc)) {
+                    let elseBody = [];
+                    currScope.owner.elseBody = { type: "Block", body: elseBody };
+                    currScope.endPc = target;
+                    scopeStack.pop();
+                    scopeStack.push({ body: elseBody, endPc: target, owner: currScope.owner });
+                }
             }
             else if (opname.startsWith("JUMPIF") || opname.startsWith("JUMPXEQ")) {
                 let fwd = sbx >= 0;
@@ -372,48 +363,46 @@ function lift(p, allprotos, indnt, getProtoCode) {
                 }
 
                 let target = pc + sbx + 1;
-                if (!fwd) {
-                    pushNode({ type: "If", cond: cnd, body: { type: "Block", body: [{ type: "Break" }] } });
-                } else {
-                    let newBlock = { type: "Block", body: [] };
-                    pushNode({ type: "If", cond: cnd, body: newBlock });
-                    scopeStack.push(newBlock.body);
-                    ends[target] = (ends[target] || 0) + 1;
+                if (fwd) {
+                    let ifBody = [];
+                    let ifNode = { type: "If", cond: cnd, body: { type: "Block", body: ifBody } };
+                    pushNode(ifNode);
+                    scopeStack.push({ body: ifBody, endPc: target, owner: ifNode });
                 }
             }
-            else if (opname === "ADD") regs[a] = { type: "BinaryExpression", op: "+", left: getR(b), right: getR(c) };
-            else if (opname === "SUB") regs[a] = { type: "BinaryExpression", op: "-", left: getR(b), right: getR(c) };
-            else if (opname === "MUL") regs[a] = { type: "BinaryExpression", op: "*", left: getR(b), right: getR(c) };
-            else if (opname === "DIV") regs[a] = { type: "BinaryExpression", op: "/", left: getR(b), right: getR(c) };
-            else if (opname === "MOD") regs[a] = { type: "BinaryExpression", op: "%", left: getR(b), right: getR(c) };
-            else if (opname === "POW") regs[a] = { type: "BinaryExpression", op: "^", left: getR(b), right: getR(c) };
-            else if (opname === "ADDK") regs[a] = { type: "BinaryExpression", op: "+", left: getR(b), right: formatK(p.consts[c]) };
-            else if (opname === "SUBK") regs[a] = { type: "BinaryExpression", op: "-", left: getR(b), right: formatK(p.consts[c]) };
-            else if (opname === "MULK") regs[a] = { type: "BinaryExpression", op: "*", left: getR(b), right: formatK(p.consts[c]) };
-            else if (opname === "DIVK") regs[a] = { type: "BinaryExpression", op: "/", left: getR(b), right: formatK(p.consts[c]) };
-            else if (opname === "MODK") regs[a] = { type: "BinaryExpression", op: "%", left: getR(b), right: formatK(p.consts[c]) };
-            else if (opname === "POWK") regs[a] = { type: "BinaryExpression", op: "^", left: getR(b), right: formatK(p.consts[c]) };
-            else if (opname === "SUBRK") regs[a] = { type: "BinaryExpression", op: "-", left: formatK(p.consts[b]), right: getR(c) };
-            else if (opname === "DIVRK") regs[a] = { type: "BinaryExpression", op: "/", left: formatK(p.consts[b]), right: getR(c) };
-            else if (opname === "IDIV") regs[a] = { type: "Call", isMethod: false, func: { type: "Identifier", name: "math.floor" }, args: [{ type: "BinaryExpression", op: "/", left: getR(b), right: getR(c) }] };
-            else if (opname === "IDIVK") regs[a] = { type: "Call", isMethod: false, func: { type: "Identifier", name: "math.floor" }, args: [{ type: "BinaryExpression", op: "/", left: getR(b), right: formatK(p.consts[c]) }] };
-            else if (opname === "AND") regs[a] = { type: "BinaryExpression", op: "and", left: getR(b), right: getR(c) };
-            else if (opname === "OR") regs[a] = { type: "BinaryExpression", op: "or", left: getR(b), right: getR(c) };
-            else if (opname === "ANDK") regs[a] = { type: "BinaryExpression", op: "and", left: getR(b), right: formatK(p.consts[c]) };
-            else if (opname === "ORK") regs[a] = { type: "BinaryExpression", op: "or", left: getR(b), right: formatK(p.consts[c]) };
-            else if (opname === "NOT") regs[a] = { type: "UnaryExpression", op: "not", arg: getR(b) };
-            else if (opname === "MINUS") regs[a] = { type: "UnaryExpression", op: "-", arg: getR(b) };
-            else if (opname === "LENGTH") regs[a] = { type: "UnaryExpression", op: "#", arg: getR(b) };
+            else if (opname === "ADD") assignVar(a, { type: "BinaryExpression", op: "+", left: getR(b), right: getR(c) });
+            else if (opname === "SUB") assignVar(a, { type: "BinaryExpression", op: "-", left: getR(b), right: getR(c) });
+            else if (opname === "MUL") assignVar(a, { type: "BinaryExpression", op: "*", left: getR(b), right: getR(c) });
+            else if (opname === "DIV") assignVar(a, { type: "BinaryExpression", op: "/", left: getR(b), right: getR(c) });
+            else if (opname === "MOD") assignVar(a, { type: "BinaryExpression", op: "%", left: getR(b), right: getR(c) });
+            else if (opname === "POW") assignVar(a, { type: "BinaryExpression", op: "^", left: getR(b), right: getR(c) });
+            else if (opname === "ADDK") assignVar(a, { type: "BinaryExpression", op: "+", left: getR(b), right: formatK(p.consts[c]) });
+            else if (opname === "SUBK") assignVar(a, { type: "BinaryExpression", op: "-", left: getR(b), right: formatK(p.consts[c]) });
+            else if (opname === "MULK") assignVar(a, { type: "BinaryExpression", op: "*", left: getR(b), right: formatK(p.consts[c]) });
+            else if (opname === "DIVK") assignVar(a, { type: "BinaryExpression", op: "/", left: getR(b), right: formatK(p.consts[c]) });
+            else if (opname === "MODK") assignVar(a, { type: "BinaryExpression", op: "%", left: getR(b), right: formatK(p.consts[c]) });
+            else if (opname === "POWK") assignVar(a, { type: "BinaryExpression", op: "^", left: getR(b), right: formatK(p.consts[c]) });
+            else if (opname === "SUBRK") assignVar(a, { type: "BinaryExpression", op: "-", left: formatK(p.consts[b]), right: getR(c) });
+            else if (opname === "DIVRK") assignVar(a, { type: "BinaryExpression", op: "/", left: formatK(p.consts[b]), right: getR(c) });
+            else if (opname === "IDIV") assignVar(a, { type: "Call", isMethod: false, func: { type: "Identifier", name: "math.floor" }, args: [{ type: "BinaryExpression", op: "/", left: getR(b), right: getR(c) }] });
+            else if (opname === "IDIVK") assignVar(a, { type: "Call", isMethod: false, func: { type: "Identifier", name: "math.floor" }, args: [{ type: "BinaryExpression", op: "/", left: getR(b), right: formatK(p.consts[c]) }] });
+            else if (opname === "AND") assignVar(a, { type: "BinaryExpression", op: "and", left: getR(b), right: getR(c) });
+            else if (opname === "OR") assignVar(a, { type: "BinaryExpression", op: "or", left: getR(b), right: getR(c) });
+            else if (opname === "ANDK") assignVar(a, { type: "BinaryExpression", op: "and", left: getR(b), right: formatK(p.consts[c]) });
+            else if (opname === "ORK") assignVar(a, { type: "BinaryExpression", op: "or", left: getR(b), right: formatK(p.consts[c]) });
+            else if (opname === "NOT") assignVar(a, { type: "UnaryExpression", op: "not", arg: getR(b) });
+            else if (opname === "MINUS") assignVar(a, { type: "UnaryExpression", op: "-", arg: getR(b) });
+            else if (opname === "LENGTH") assignVar(a, { type: "UnaryExpression", op: "#", arg: getR(b) });
             else if (opname === "CONCAT") {
                 let rArgs = [];
                 for (let i = b; i <= c; i++) rArgs.push(getR(i));
-                regs[a] = { type: "BinaryExpression", op: "..", left: rArgs[0], right: rArgs[1] };
+                assignVar(a, { type: "BinaryExpression", op: "..", left: rArgs[0], right: rArgs[1] });
             }
-            else if (opname === "GETUPVAL") regs[a] = { type: "Identifier", name: p.upvalues[b] || `upval_${b}` };
+            else if (opname === "GETUPVAL") assignVar(a, { type: "Identifier", name: p.upvalues[b] || `upval_${b}` });
             else if (opname === "SETUPVAL") pushNode({ type: "Assignment", left: { type: "Identifier", name: p.upvalues[b] || `upval_${b}` }, right: getR(a) });
             else if (opname === "NEWCLOSURE" || opname === "DUPCLOSURE") {
                 let protoIdx = opname === "NEWCLOSURE" ? bx : (p.consts[bx] ? p.consts[bx].id : 0);
-                assignVar(a, getProtoCode(protoIdx, 0));
+                assignVar(a, getProtoCode(protoIdx));
             }
             else if (opname === "NEWTABLE" || opname === "DUPTABLE") {
                 assignVar(a, { type: "Table" });
@@ -427,23 +416,23 @@ function lift(p, allprotos, indnt, getProtoCode) {
                     }
                 }
             }
-            else if (opname === "GETVARARGS") regs[a] = { type: "Vararg" };
+            else if (opname === "GETVARARGS") assignVar(a, { type: "Vararg" });
             else if (opname === "FORNPREP") {
                 let loopVar = getVarName(a + 2);
-                let newBlock = { type: "Block", body: [] };
-                pushNode({ type: "For", vars: loopVar, start: getR(a), end: getR(a+1), step: getR(a+2), body: newBlock });
-                scopeStack.push(newBlock.body);
+                let forBody = [];
                 let target = pc + sbx + 1;
-                ends[target] = (ends[target] || 0) + 1;
+                let forNode = { type: "For", vars: loopVar, start: getR(a), end: getR(a+1), step: getR(a+2), body: { type: "Block", body: forBody } };
+                pushNode(forNode);
+                scopeStack.push({ body: forBody, endPc: target, owner: forNode });
             }
             else if (opname.startsWith("FORGPREP")) {
                 let var1 = getVarName(a + 3);
                 let var2 = getVarName(a + 4);
-                let newBlock = { type: "Block", body: [] };
-                pushNode({ type: "ForIn", vars: [var1, var2], iters: getR(a), body: newBlock });
-                scopeStack.push(newBlock.body);
+                let forBody = [];
                 let target = pc + sbx + 1;
-                ends[target] = (ends[target] || 0) + 1;
+                let forNode = { type: "ForIn", vars: [var1, var2], iters: getR(a), body: { type: "Block", body: forBody } };
+                pushNode(forNode);
+                scopeStack.push({ body: forBody, endPc: target, owner: forNode });
             }
             else if (opname === "BREAK") {
                 pushNode({ type: "Break" });
@@ -454,7 +443,7 @@ function lift(p, allprotos, indnt, getProtoCode) {
         if (hasAux) pc++;
     }
     
-    return stringifyAST({ type: "Block", body: astBody }, indnt);
+    return { type: "Block", body: astBody };
 }
 
 function process(base64str) {
@@ -570,10 +559,9 @@ function process(base64str) {
         }
         
         let activeProtos = new Set();
-        let getProtoCode = (pIdx, indnt) => {
+        let getProtoCode = (pIdx) => {
             let cp = allprotos[pIdx];
-            if (!cp) return { type: "Function", args: [], body: { type: "Block", body: [] } };
-            if (activeProtos.has(pIdx)) return { type: "Function", args: [], body: { type: "Block", body: [] } };
+            if (!cp || activeProtos.has(pIdx)) return { type: "Function", args: [], body: { type: "Block", body: [] } };
             if (cp.astNode) return cp.astNode;
             
             activeProtos.add(pIdx);
@@ -589,14 +577,15 @@ function process(base64str) {
             }
             if (cp.isvararg) args.push("...");
             
-            let bodyStr = lift(cp, allprotos, indnt + 1, getProtoCode);
-            cp.astNode = { type: "Identifier", name: `function(${args.join(", ")})\n${bodyStr}\n${"    ".repeat(indnt)}end` };
+            let bodyBlock = lift(cp, allprotos, getProtoCode);
+            cp.astNode = { type: "Function", args: args, body: bodyBlock };
             
             activeProtos.delete(pIdx);
             return cp.astNode;
         };
         
-        let finalCode = lift(allprotos[mainindex], allprotos, 0, getProtoCode);
+        let finalAST = lift(allprotos[mainindex], allprotos, getProtoCode);
+        let finalCode = stringifyAST(finalAST, 0);
         return finalCode.length > 0 ? finalCode : "";
 
     } catch (e) {
