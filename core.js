@@ -42,7 +42,7 @@ function formatK(k) {
     return k.v !== undefined ? k.v : "nil";
 }
 
-function parseproto(r, strings, version, protoIdx, trace, layout) {
+function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, useUpvalueNames) {
     let startOffset = r.offset;
     try {
         let maxstacksize = r.readbyte();
@@ -50,7 +50,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
         let numupvalues = r.readbyte();
         let isvararg = r.readbyte();
         
-        if (version >= 4) {
+        if (useTypeInfo && version >= 4) {
             let typeinfoFlags = r.readbyte();
             if (typeinfoFlags > 0) {
                 let typesize = r.readvarint();
@@ -139,10 +139,12 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
                         let reg = r.readbyte();
                         p_locvars.push({ name: strings[n_id - 1] || "v" + reg, startpc, endpc, reg });
                     }
-                    let upvs = r.readvarint();
-                    for (let i = 0; i < upvs; i++) {
-                        let n_id = r.readvarint();
-                        p_upvalues.push(strings[n_id - 1] || "upval_" + i);
+                    if (useUpvalueNames) {
+                        let upvs = r.readvarint();
+                        for (let i = 0; i < upvs; i++) {
+                            let n_id = r.readvarint();
+                            p_upvalues.push(strings[n_id - 1] || "upval_" + i);
+                        }
                     }
                 }
             }
@@ -225,7 +227,7 @@ function lift(p, allprotos, indnt, getProtoCode) {
         let aux = hasAux ? (p.instrs[pc + 1] || 0) : 0;
         let auxVal = hasAux ? p.consts[(aux >>> 0) & 0xFFFFFF] : null;
 
-        if (opname === "NOP" || opname === "COVERAGE" || opname === "CAPTURE") {
+        if (opname === "NOP" || opname === "COVERAGE" || opname === "CAPTURE" || opname === "PREPVARARGS") {
             pc += hasAux ? 2 : 1;
             continue;
         }
@@ -354,7 +356,7 @@ function lift(p, allprotos, indnt, getProtoCode) {
                 
                 if (opname === "JUMPXEQKNIL") cnd = fwd ? `${left} ~= nil` : `${left} == nil`;
                 else if (opname === "JUMPXEQKB") {
-                    let kb = (raw >>> 16) === 1 ? "true" : "false";
+                    let kb = ((raw >>> 16) & 0xFF) === 1 ? "true" : "false";
                     cnd = fwd ? `${left} ~= ${kb}` : `${left} == ${kb}`;
                 }
                 else cnd = fwd ? `${left} ~= ${kn}` : `${left} == ${kn}`;
@@ -381,6 +383,10 @@ function lift(p, allprotos, indnt, getProtoCode) {
             else if (opname === "DIVK") regs[a] = `${regs[b] || "nil"} / ${formatK(p.consts[c])}`;
             else if (opname === "MODK") regs[a] = `${regs[b] || "nil"} % ${formatK(p.consts[c])}`;
             else if (opname === "POWK") regs[a] = `${regs[b] || "nil"} ^ ${formatK(p.consts[c])}`;
+            else if (opname === "SUBRK") regs[a] = `${formatK(p.consts[b])} - ${regs[c] || "nil"}`;
+            else if (opname === "DIVRK") regs[a] = `${formatK(p.consts[b])} / ${regs[c] || "nil"}`;
+            else if (opname === "IDIV") regs[a] = `math.floor(${regs[b] || "nil"} / ${regs[c] || "nil"})`;
+            else if (opname === "IDIVK") regs[a] = `math.floor(${regs[b] || "nil"} / ${formatK(p.consts[c])})`;
             else if (opname === "AND") regs[a] = `${regs[b] || "nil"} and ${regs[c] || "nil"}`;
             else if (opname === "OR") regs[a] = `${regs[b] || "nil"} or ${regs[c] || "nil"}`;
             else if (opname === "ANDK") regs[a] = `${regs[b] || "nil"} and ${formatK(p.consts[c])}`;
@@ -472,68 +478,87 @@ function process(base64str) {
         let version = r.readbyte();
         if (version < 3 || version > 7) return "";
         
-        if (version >= 4) {
-            r.readbyte();
-        }
+        let savedGlobalOffset = r.offset;
+        let globalActionFlagOptions = (version >= 4) ? [true, false] : [false];
         
-        let stringcount = r.readvarint();
-        let strings =[];
-        for (let i = 0; i < stringcount; i++) {
-            let slen = r.readvarint();
-            strings.push(r.readstring(slen));
-        }
-        
-        let originalStringsLength = strings.length;
-        let savedStringsOffset = r.offset;
-        
+        let structuralOptions = [
+            { typeinfo: false, upvalues: false },
+            { typeinfo: false, upvalues: true },
+            { typeinfo: true,  upvalues: false },
+            { typeinfo: true,  upvalues: true }
+        ];
+
         let found = false;
         let allprotos =[];
         let mainindex = 0;
 
-        for (let lIdx = 0; lIdx < layouts.length; lIdx++) {
-            let layout = layouts[lIdx];
-            for (let extraStrings = 0; extraStrings <= 15; extraStrings++) {
-                r.offset = savedStringsOffset;
-                strings.length = originalStringsLength;
-                
-                let extraSuccess = true;
-                try {
-                    for(let k = 0; k < extraStrings; k++) {
-                        let slen = r.readvarint();
-                        strings.push(r.readstring(slen));
-                    }
-                } catch(e) {
-                    extraSuccess = false;
+        for (let useGlobalActionFlag of globalActionFlagOptions) {
+            r.offset = savedGlobalOffset;
+            if (useGlobalActionFlag) r.readbyte();
+
+            try {
+                let stringcount = r.readvarint();
+                if (stringcount > 100000) continue; 
+
+                let strings =[];
+                for (let i = 0; i < stringcount; i++) {
+                    let slen = r.readvarint();
+                    strings.push(r.readstring(slen));
                 }
-                if (!extraSuccess) continue;
                 
-                try {
-                    let protocount = r.readvarint();
-                    let tempProtos =[];
-                    let pSuccess = true;
-                    for (let i = 0; i < protocount; i++) {
-                        let p = parseproto(r, strings, version, i,[], layout);
-                        if (!p.success) {
-                            pSuccess = false;
-                            break;
-                        }
-                        tempProtos.push(p);
-                    }
-                    
-                    if (pSuccess) {
-                        let mIdx = r.readvarint();
-                        if (mIdx >= 0 && mIdx < protocount && tempProtos[mIdx] && tempProtos[mIdx].instrs.length > 0) {
-                            let firstOp = tempProtos[mIdx].instrs[0] & 0xFF;
-                            if (opcodes[firstOp] && opcodes[firstOp] !== "UNKNOWN") {
-                                allprotos = tempProtos;
-                                mainindex = mIdx;
-                                found = true;
-                                break;
+                let originalStringsLength = strings.length;
+                let savedStringsOffset = r.offset;
+
+                for (let lIdx = 0; lIdx < layouts.length; lIdx++) {
+                    let layout = layouts[lIdx];
+                    for (let opt of structuralOptions) {
+                        for (let extraStrings = 0; extraStrings <= 15; extraStrings++) {
+                            r.offset = savedStringsOffset;
+                            strings.length = originalStringsLength;
+                            
+                            let extraSuccess = true;
+                            try {
+                                for(let k = 0; k < extraStrings; k++) {
+                                    let slen = r.readvarint();
+                                    strings.push(r.readstring(slen));
+                                }
+                            } catch(e) {
+                                extraSuccess = false;
                             }
+                            if (!extraSuccess) continue;
+                            
+                            try {
+                                let protocount = r.readvarint();
+                                let tempProtos =[];
+                                let pSuccess = true;
+                                for (let i = 0; i < protocount; i++) {
+                                    let p = parseproto(r, strings, version, i, [], layout, opt.typeinfo, opt.upvalues);
+                                    if (!p.success) {
+                                        pSuccess = false;
+                                        break;
+                                    }
+                                    tempProtos.push(p);
+                                }
+                                
+                                if (pSuccess) {
+                                    let mIdx = r.readvarint();
+                                    if (mIdx >= 0 && mIdx < protocount && tempProtos[mIdx] && tempProtos[mIdx].instrs.length > 0) {
+                                        let firstOp = tempProtos[mIdx].instrs[0] & 0xFF;
+                                        if (opcodes[firstOp] && !opcodes[firstOp].includes("UNKNOWN")) {
+                                            allprotos = tempProtos;
+                                            mainindex = mIdx;
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            } catch (e) {}
                         }
+                        if (found) break;
                     }
-                } catch (e) {}
-            }
+                    if (found) break;
+                }
+            } catch (e) {}
             if (found) break;
         }
 
