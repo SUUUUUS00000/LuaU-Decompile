@@ -1,84 +1,103 @@
 const bufferreader = require('./reader');
 const opcodes = require('./opcodes');
 
-function parseproto(r, strings, version) {
-    let maxstacksize = r.readbyte();
-    let numparams = r.readbyte();
-    let numupvalues = r.readbyte();
-    let isvararg = r.readbyte();
-    
-    if (version >= 4) {
-        let typed = r.readbyte();
-        if (typed === 1 || typed === true) {
-            r.offset += r.readvarint();
+function parseproto(r, strings, version, protoIdx) {
+    let state = "init";
+    let startOffset = r.offset;
+    try {
+        state = "maxstacksize";
+        let maxstacksize = r.readbyte();
+        let numparams = r.readbyte();
+        let numupvalues = r.readbyte();
+        let isvararg = r.readbyte();
+        
+        if (version >= 4) {
+            state = "typeinfo";
+            let flags = r.readbyte();
+            let typesize = r.readvarint();
+            r.offset += typesize;
         }
+        
+        state = "instrcount";
+        let instrcount = r.readvarint();
+        let instrs =[];
+        for (let i = 0; i < instrcount; i++) {
+            instrs.push(r.readuint32());
+        }
+        
+        state = "constcount";
+        let constcount = r.readvarint();
+        let consts =[];
+        for (let i = 0; i < constcount; i++) {
+            let type = r.readbyte();
+            if (type === 0) consts.push({ t: 'nil', v: 'nil' });
+            else if (type === 1) consts.push({ t: 'bool', v: r.readbyte() === 1 });
+            else if (type === 2) { consts.push({ t: 'num', v: r.buffer.readDoubleLE(r.offset) }); r.offset += 8; }
+            else if (type === 3) consts.push({ t: 'str', v: strings[r.readvarint() - 1] || "" });
+            else if (type === 4) {
+                let id = r.readuint32();
+                let count = id >>> 30;
+                let arr =[];
+                let getval = (idx) => { let c = consts[idx]; return c ? (c.t === 'str' ? c.v : c.v) : ""; };
+                if (count > 0) arr.push(getval((id >> 20) & 1023));
+                if (count > 1) arr.push(getval((id >> 10) & 1023));
+                if (count > 2) arr.push(getval(id & 1023));
+                consts.push({ t: 'import', v: arr.join(".") });
+            }
+            else if (type === 5) {
+                let sz = r.readvarint();
+                for(let j = 0; j < sz; j++) r.readvarint();
+                consts.push({ t: 'table', v: '{}' });
+            }
+            else if (type === 6) consts.push({ t: 'closure', id: r.readvarint() });
+            else if (type === 7) { r.offset += 16; consts.push({ t: 'vector', v: 'Vector3.new()' }); }
+            else throw new Error(`Unknown type ${type}`);
+        }
+        
+        state = "protocount";
+        let protocount = r.readvarint();
+        let protos =[];
+        for (let i = 0; i < protocount; i++) {
+            protos.push(r.readvarint());
+        }
+        
+        state = "linedefined";
+        let linedefined = r.readvarint();
+        let nameid = r.readvarint();
+        let protoname = nameid > 0 ? strings[nameid - 1] : "anonymous";
+        
+        state = "lineinfo";
+        let hasLineInfo = r.readbyte();
+        if (hasLineInfo === 1) {
+            let linegap = r.readbyte();
+            let intervals = instrcount > 0 ? ((instrcount - 1) >> linegap) + 1 : 0;
+            r.offset += instrcount + (intervals * 4);
+        }
+        
+        state = "debuginfo";
+        let hasDebugInfo = r.readbyte();
+        let locvars = [];
+        let upvalues =[];
+        if (hasDebugInfo === 1) {
+            let locs = r.readvarint();
+            for (let i = 0; i < locs; i++) {
+                let n_id = r.readvarint();
+                let startpc = r.readvarint();
+                let endpc = r.readvarint();
+                let reg = r.readbyte();
+                locvars.push({ name: strings[n_id - 1] || "v" + reg, startpc, endpc, reg });
+            }
+            let upvs = r.readvarint();
+            for (let i = 0; i < upvs; i++) {
+                let n_id = r.readvarint();
+                upvalues.push(strings[n_id - 1] || "upval_" + i);
+            }
+        }
+        
+        return { numparams, isvararg, instrs, consts, protos, protoname, locvars, upvalues, success: true, parsed: r.offset - startOffset };
+    } catch (e) {
+        return { success: false, error: e.message, state: state, offset: r.offset, protoIdx: protoIdx };
     }
-    
-    let instrcount = r.readvarint();
-    let instrs =[];
-    for (let i = 0; i < instrcount; i++) instrs.push(r.readuint32());
-    
-    let constcount = r.readvarint();
-    let consts =[];
-    for (let i = 0; i < constcount; i++) {
-        let type = r.readbyte();
-        if (type === 0) consts.push({ t: 'nil', v: 'nil' });
-        else if (type === 1) consts.push({ t: 'bool', v: r.readbyte() === 1 });
-        else if (type === 2) { consts.push({ t: 'num', v: r.buffer.readDoubleLE(r.offset) }); r.offset += 8; }
-        else if (type === 3) consts.push({ t: 'str', v: strings[r.readvarint() - 1] || "" });
-        else if (type === 4) {
-            let id = r.readuint32();
-            let count = id >>> 30;
-            let arr =[];
-            let getval = (idx) => { let c = consts[idx]; return c ? (c.t === 'str' ? c.v : c.v) : ""; };
-            if (count > 0) arr.push(getval((id >> 20) & 1023));
-            if (count > 1) arr.push(getval((id >> 10) & 1023));
-            if (count > 2) arr.push(getval(id & 1023));
-            consts.push({ t: 'import', v: arr.join(".") });
-        }
-        else if (type === 5) {
-            let sz = r.readvarint();
-            for(let j = 0; j < sz; j++) r.readvarint();
-            consts.push({ t: 'table', v: '{}' });
-        }
-        else if (type === 6) consts.push({ t: 'closure', id: r.readvarint() });
-        else if (type === 7) { r.offset += 16; consts.push({ t: 'vector', v: 'Vector3.new()' }); }
-        else consts.push({ t: 'unk', v: 'unknown' });
-    }
-    
-    let protocount = r.readvarint();
-    let protos =[];
-    for (let i = 0; i < protocount; i++) protos.push(r.readvarint());
-    
-    let linedefined = r.readvarint();
-    let nameid = r.readvarint();
-    let protoname = nameid > 0 ? strings[nameid - 1] : "anonymous";
-    
-    if (r.readbyte() === 1) {
-        let linegap = r.readbyte();
-        let intervals = instrcount > 0 ? ((instrcount - 1) >> linegap) + 1 : 0;
-        r.offset += instrcount + (intervals * 4);
-    }
-    
-    let locvars = [];
-    let upvalues =[];
-    if (r.readbyte() === 1) {
-        let locs = r.readvarint();
-        for (let i = 0; i < locs; i++) {
-            let n_id = r.readvarint();
-            let startpc = r.readvarint();
-            let endpc = r.readvarint();
-            let reg = r.readbyte();
-            locvars.push({ name: strings[n_id - 1] || "v" + reg, startpc, endpc, reg });
-        }
-        let upvs = r.readvarint();
-        for (let i = 0; i < upvs; i++) {
-            let n_id = r.readvarint();
-            upvalues.push(strings[n_id - 1] || "upval_" + i);
-        }
-    }
-    
-    return { numparams, isvararg, instrs, consts, protos, protoname, locvars, upvalues };
 }
 
 function formatK(k) {
@@ -297,41 +316,84 @@ function lift(p, allprotos, indnt) {
 }
 
 function process(base64str) {
-    let buf = Buffer.from(base64str, 'base64');
-    let r = new bufferreader(buf);
-    let version = r.readbyte();
-    
-    if (version < 3 || version > 7) return "error invalid bytecode";
-    if (version >= 4) r.readbyte();
-    
-    let stringcount = r.readvarint();
-    let strings =[];
-    for (let i = 0; i < stringcount; i++) strings.push(r.readstring(r.readvarint()));
-    
-    let protocount = r.readvarint();
-    let allprotos =[];
-    for (let i = 0; i < protocount; i++) allprotos.push(parseproto(r, strings, version));
-    
-    let mainindex = r.readvarint();
-    if (!allprotos[mainindex]) return "error missing main proto";
-    
-    for (let i = allprotos.length - 1; i >= 0; i--) {
-        let p = allprotos[i];
-        let body = lift(p, allprotos, 1);
-        let args =[];
-        for (let a = 0; a < p.numparams; a++) {
-            let name = `v${a + 1}`;
-            if (p.locvars) {
-                let loc = p.locvars.find(v => v.reg === a && v.startpc <= 1);
-                if (loc) name = loc.name;
-            }
-            args.push(name);
-        }
-        if (p.isvararg) args.push("...");
-        p.code = `function(${args.join(", ")})\n${body}\nend`;
+    let buf;
+    try {
+        buf = Buffer.from(base64str, 'base64');
+    } catch (e) {
+        return `--[DECOMPILER CRASH]\n-- Reason: Failed to decode base64 buffer\n-- Message: ${e.message}`;
     }
     
-    return lift(allprotos[mainindex], allprotos, 0);
+    let r = new bufferreader(buf);
+    let trace =[];
+    
+    let dumpError = (msg) => {
+        return `-- [DECOMPILER CRASH]\n-- Reason: ${msg}\n-- Buffer Length: ${r.length}\n-- Current Offset: ${r.offset}\n-- Execution Trace:\n-- > ` + trace.join("\n-- > ");
+    };
+
+    try {
+        trace.push("Start reading bytecode");
+        let version = r.readbyte();
+        trace.push(`Version: ${version}`);
+        
+        if (version < 3 || version > 7) return dumpError(`Invalid bytecode version: ${version}`);
+        
+        if (version >= 4) {
+            let t_ver = r.readbyte();
+            trace.push(`TypesVersion: ${t_ver}`);
+        }
+        
+        let stringcount = r.readvarint();
+        trace.push(`String count: ${stringcount}`);
+        
+        let strings =[];
+        for (let i = 0; i < stringcount; i++) {
+            let slen = r.readvarint();
+            strings.push(r.readstring(slen));
+        }
+        trace.push("Strings parsed successfully");
+        
+        let protocount = r.readvarint();
+        trace.push(`Proto count: ${protocount}`);
+        
+        let allprotos =[];
+        for (let i = 0; i < protocount; i++) {
+            let p = parseproto(r, strings, version, i);
+            if (!p.success) {
+                return dumpError(`Proto [${i}] crash during: ${p.state}. Error: ${p.error}. Offset stopped at ${p.offset}`);
+            }
+            trace.push(`Proto [${i}] parsed (${p.parsed} bytes)`);
+            allprotos.push(p);
+        }
+        
+        trace.push("Reading mainindex");
+        let mainindex = r.readvarint();
+        trace.push(`Mainindex: ${mainindex}`);
+        
+        if (!allprotos[mainindex]) {
+            return dumpError(`Missing main proto. mainindex=${mainindex} but protocount=${protocount}`);
+        }
+        
+        trace.push("Lifting execution blocks");
+        for (let i = allprotos.length - 1; i >= 0; i--) {
+            let p = allprotos[i];
+            let body = lift(p, allprotos, 1);
+            let args =[];
+            for (let a = 0; a < p.numparams; a++) {
+                let name = `v${a + 1}`;
+                if (p.locvars) {
+                    let loc = p.locvars.find(v => v.reg === a && v.startpc <= 1);
+                    if (loc) name = loc.name;
+                }
+                args.push(name);
+            }
+            if (p.isvararg) args.push("...");
+            p.code = `function(${args.join(", ")})\n${body}\nend`;
+        }
+        
+        return lift(allprotos[mainindex], allprotos, 0);
+    } catch (e) {
+        return dumpError(`Unexpected fatal trap: ${e.message}\n-- Stack: ${e.stack}`);
+    }
 }
 
 module.exports = { process };
