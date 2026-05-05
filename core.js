@@ -8,8 +8,10 @@ function parseproto(r, strings, version) {
     let isvararg = r.readbyte();
     
     if (version >= 4) {
-        r.readbyte();
-        r.offset += r.readvarint();
+        let typed = r.readbyte();
+        if (typed === 1 || typed === true) {
+            r.offset += r.readvarint();
+        }
     }
     
     let instrcount = r.readvarint();
@@ -34,7 +36,11 @@ function parseproto(r, strings, version) {
             if (count > 2) arr.push(getval(id & 1023));
             consts.push({ t: 'import', v: arr.join(".") });
         }
-        else if (type === 5) { let sz = r.readvarint(); for(let j = 0; j < sz; j++) r.readvarint(); consts.push({ t: 'table', v: '{}' }); }
+        else if (type === 5) {
+            let sz = r.readvarint();
+            for(let j = 0; j < sz; j++) r.readvarint();
+            consts.push({ t: 'table', v: '{}' });
+        }
         else if (type === 6) consts.push({ t: 'closure', id: r.readvarint() });
         else if (type === 7) { r.offset += 16; consts.push({ t: 'vector', v: 'Vector3.new()' }); }
         else consts.push({ t: 'unk', v: 'unknown' });
@@ -51,10 +57,10 @@ function parseproto(r, strings, version) {
     if (r.readbyte() === 1) {
         let linegap = r.readbyte();
         let intervals = instrcount > 0 ? ((instrcount - 1) >> linegap) + 1 : 0;
-        r.offset += instrcount + (intervals * 8);
+        r.offset += instrcount + (intervals * 4);
     }
     
-    let locvars =[];
+    let locvars = [];
     let upvalues =[];
     if (r.readbyte() === 1) {
         let locs = r.readvarint();
@@ -77,7 +83,8 @@ function parseproto(r, strings, version) {
 
 function formatK(k) {
     if (!k) return "nil";
-    if (k.t === 'str') return `"${k.v}"`;
+    if (k.t === 'str') return `"${k.v.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"`;
+    if (k.t === 'bool') return k.v ? "true" : "false";
     return k.v;
 }
 
@@ -90,6 +97,7 @@ function lift(p, allprotos, indnt) {
     if (!p || !p.instrs) return "";
     let lines =[];
     let regs = new Array(256).fill("nil");
+    let definedVars = new Set();
     let pc = 0;
     let endScopes = {};
     
@@ -102,6 +110,17 @@ function lift(p, allprotos, indnt) {
     };
 
     let push = (str) => { lines.push("    ".repeat(indnt) + str); };
+
+    let assignVar = (reg, val) => {
+        let varName = getVarName(reg);
+        if (definedVars.has(varName)) {
+            push(`${varName} = ${val}`);
+        } else {
+            definedVars.add(varName);
+            push(`local ${varName} = ${val}`);
+        }
+        regs[reg] = varName;
+    };
 
     while (pc < p.instrs.length) {
         if (endScopes[pc]) {
@@ -143,17 +162,16 @@ function lift(p, allprotos, indnt) {
             else if (opname === "CALL") {
                 let f = regs[a];
                 let args =[];
-                let argcount = b - 1;
-                if (argcount < 0) argcount = 0;
+                let argcount = b === 0 ? 0 : b - 1;
+                let callStr = "";
                 if (f && f.m) {
                     for (let i = 2; i <= argcount; i++) args.push(regs[a + i] || "nil");
-                    let callStr = `${f.obj}:${f.func}(${args.join(", ")})`;
-                    if (c - 1 === 0) push(callStr); else regs[a] = callStr;
+                    callStr = `${f.obj}:${f.func}(${args.join(", ")})`;
                 } else {
                     for (let i = 1; i <= argcount; i++) args.push(regs[a + i] || "nil");
-                    let callStr = `${typeof f === 'string' ? f : "func"}(${args.join(", ")})`;
-                    if (c - 1 === 0) push(callStr); else regs[a] = callStr;
+                    callStr = `${typeof f === 'string' ? f : "func"}(${args.join(", ")})`;
                 }
+                if (c - 1 === 0) push(callStr); else assignVar(a, callStr);
             }
             else if (opname === "RETURN") {
                 if (b > 1) {
@@ -234,16 +252,12 @@ function lift(p, allprotos, indnt) {
             else if (opname === "GETUPVAL") regs[a] = p.upvalues[b] || `upval_${b}`;
             else if (opname === "SETUPVAL") push(`${p.upvalues[b] || `upval_${b}`} = ${regs[a] || "nil"}`);
             else if (opname === "NEWCLOSURE" || opname === "DUPCLOSURE") {
-                let funcName = getVarName(a);
-                let protoIdx = opname === "NEWCLOSURE" ? bx : p.consts[bx].id;
+                let protoIdx = opname === "NEWCLOSURE" ? bx : (p.consts[bx] ? p.consts[bx].id : 0);
                 let code = allprotos[protoIdx] ? allprotos[protoIdx].code : "function() end";
-                push(`local ${funcName} = ${code}`);
-                regs[a] = funcName;
+                assignVar(a, code);
             }
             else if (opname === "NEWTABLE" || opname === "DUPTABLE") {
-                let tblName = getVarName(a);
-                push(`local ${tblName} = {}`);
-                regs[a] = tblName;
+                assignVar(a, "{}");
                 if (opname === "NEWTABLE") pc++; 
             }
             else if (opname === "SETLIST") {
