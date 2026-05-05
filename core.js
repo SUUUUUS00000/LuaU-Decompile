@@ -2,7 +2,7 @@ const bufferreader = require('./reader');
 const opcodes = require('./opcodes');
 
 const layouts = [];
-const permute = (arr, m = []) => {
+const permute = (arr, m =[]) => {
     if (arr.length === 0) layouts.push(m);
     else for (let i = 0; i < arr.length; i++) {
         let curr = arr.slice();
@@ -16,8 +16,8 @@ const aux_opcodes = new Set([
     "GETGLOBAL", "SETGLOBAL", "GETIMPORT", "GETTABLEKS", "SETTABLEKS", "NAMECALL",
     "JUMPIFEQ", "JUMPIFNOTEQ", "JUMPIFLE", "JUMPIFNOTLE", "JUMPIFLT", "JUMPIFNOTLT",
     "JUMPXEQKNIL", "JUMPXEQKB", "JUMPXEQKN", "JUMPXEQKS",
-    "FORGLOOP", "LOADKX", "SETLIST", "NEWTABLE", "DUPTABLE", "JUMPX",
-    "FASTCALL2", "FASTCALL2K", "FASTCALL3"
+    "FORGLOOP", "LOADKX", "SETLIST", "NEWTABLE", "DUPTABLE", "JUMPX", 
+    "FASTCALL1", "FASTCALL2", "FASTCALL2K", "FASTCALL3"
 ]);
 
 function formatKVal(k) {
@@ -27,6 +27,7 @@ function formatKVal(k) {
     if (k.t === 'table') return `{}`;
     if (k.t === 'import') return k.v;
     if (k.t === 'bool') return k.v ? "true" : "false";
+    if (k.t === 'num') return k.v;
     return k.v !== undefined ? k.v : "nil";
 }
 
@@ -37,6 +38,7 @@ function formatK(k) {
     if (k.t === 'closure') return `closure_${k.id}`;
     if (k.t === 'table') return `{}`;
     if (k.t === 'import') return k.v;
+    if (k.t === 'num') return k.v;
     return k.v !== undefined ? k.v : "nil";
 }
 
@@ -170,6 +172,7 @@ function lift(p, allprotos, indnt, getProtoCode) {
     let definedVars = new Set();
     let pc = 0;
     let endScopes = {};
+    let loopStarts = new Set();
     
     let getVarName = (reg) => {
         if (p.locvars) {
@@ -194,15 +197,19 @@ function lift(p, allprotos, indnt, getProtoCode) {
 
     while (pc < p.instrs.length) {
         if (endScopes[pc]) {
-            for (let i = 0; i < endScopes[pc].c; i++) {
+            if (endScopes[pc].t === "else") {
                 indnt = Math.max(0, indnt - 1);
-                if (endScopes[pc].t === "else") {
-                    push("else");
-                    indnt++;
-                } else {
-                    push("end");
-                }
+                push("else");
+                indnt++;
+            } else if (endScopes[pc].c > 0) {
+                indnt = Math.max(0, indnt - endScopes[pc].c);
+                for(let i = 0; i < endScopes[pc].c; i++) push("end");
             }
+        }
+
+        if (loopStarts.has(pc)) {
+            push("while true do");
+            indnt++;
         }
 
         let raw = p.instrs[pc];
@@ -218,113 +225,226 @@ function lift(p, allprotos, indnt, getProtoCode) {
         let aux = hasAux ? (p.instrs[pc + 1] || 0) : 0;
         let auxVal = hasAux ? p.consts[(aux >>> 0) & 0xFFFFFF] : null;
 
+        if (opname === "NOP" || opname === "COVERAGE" || opname === "CAPTURE") {
+            pc += hasAux ? 2 : 1;
+            continue;
+        }
+
         try {
             if (opname === "LOADNIL") regs[a] = "nil";
             else if (opname === "LOADB") { 
                 regs[a] = b === 1 ? "true" : "false"; 
-                if (c > 0) pc += c;
+                if (c > 0) {
+                    let target = pc + c + 1;
+                    if (endScopes[pc + 1] && endScopes[pc + 1].t !== "else") {
+                        let moveCount = endScopes[pc + 1].c;
+                        endScopes[pc + 1].t = "else";
+                        endScopes[pc + 1].c = 0;
+                        if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                        endScopes[target].c += moveCount;
+                    }
+                }
             }
-            else if (opname === "LOADN") regs[a] = sbx.toString();
+            else if (opname === "LOADN") regs[a] = sbx;
             else if (opname === "LOADK") regs[a] = formatK(p.consts[bx]);
             else if (opname === "LOADKX") regs[a] = formatK(auxVal);
-            else if (opname === "MOVE") regs[a] = regs[b] || getVarName(b);
+            else if (opname === "MOVE") regs[a] = regs[b] || "nil";
             else if (opname === "GETGLOBAL") regs[a] = formatKVal(auxVal);
-            else if (opname === "SETGLOBAL") push(`${formatKVal(auxVal)} = ${regs[a] || getVarName(a)}`);
+            else if (opname === "SETGLOBAL") push(`${formatKVal(auxVal)} = ${regs[a] || "nil"}`);
             else if (opname === "GETIMPORT") regs[a] = formatKVal(auxVal);
-            else if (opname === "GETTABLE") regs[a] = `${regs[b] || getVarName(b)}[${regs[c] || getVarName(c)}]`;
-            else if (opname === "SETTABLE") push(`${regs[b] || getVarName(b)}[${regs[c] || getVarName(c)}] = ${regs[a] || getVarName(a)}`);
-            else if (opname === "GETTABLEKS") regs[a] = `${regs[b] || getVarName(b)}.${formatKVal(auxVal)}`;
-            else if (opname === "SETTABLEKS") push(`${regs[b] || getVarName(b)}.${formatKVal(auxVal)} = ${regs[a] || getVarName(a)}`);
+            else if (opname === "GETTABLE") regs[a] = `${regs[b] || "nil"}[${regs[c] || "nil"}]`;
+            else if (opname === "GETTABLEKS") regs[a] = `${regs[b] || "nil"}.${formatKVal(auxVal)}`;
+            else if (opname === "GETTABLEN") regs[a] = `${regs[b] || "nil"}[${c + 1}]`;
+            else if (opname === "SETTABLE") push(`${regs[b] || "nil"}[${regs[c] || "nil"}] = ${regs[a] || "nil"}`);
+            else if (opname === "SETTABLEKS") push(`${regs[b] || "nil"}.${formatKVal(auxVal)} = ${regs[a] || "nil"}`);
+            else if (opname === "SETTABLEN") push(`${regs[b] || "nil"}[${c + 1}] = ${regs[a] || "nil"}`);
             else if (opname === "NAMECALL") {
-                regs[a] = { m: true, obj: regs[b] || getVarName(b), func: formatKVal(auxVal) };
-                regs[a + 1] = regs[b] || getVarName(b);
+                regs[a] = { m: true, obj: regs[b] || "nil", func: formatKVal(auxVal) };
+                regs[a + 1] = regs[b] || "nil";
             }
             else if (opname === "CALL") {
                 let f = regs[a];
-                let args = [];
+                let args =[];
                 let callStr = "";
-                let argcount = b === 0 ? 0 : b - 1;
-                if (f && typeof f === "object" && f.m) {
-                    for (let i = 2; i <= argcount; i++) args.push(regs[a + i] || getVarName(a + i));
-                    callStr = `${f.obj}:${f.func}(${args.join(", ")})`;
+                if (b === 0) {
+                    args.push("...");
                 } else {
-                    for (let i = 1; i <= argcount; i++) args.push(regs[a + i] || getVarName(a + i));
-                    callStr = `${f || getVarName(a)}(${args.join(", ")})`;
+                    let argcount = b - 1;
+                    if (f && f.m) {
+                        for (let i = 2; i <= argcount; i++) args.push(regs[a + i] || "nil");
+                    } else {
+                        for (let i = 1; i <= argcount; i++) args.push(regs[a + i] || "nil");
+                    }
                 }
+                
+                if (f && f.m) callStr = `${f.obj}:${f.func}(${args.join(", ")})`;
+                else callStr = `${typeof f === 'string' ? f : "func"}(${args.join(", ")})`;
+                
                 if (c - 1 === 0) push(callStr); else assignVar(a, callStr);
             }
             else if (opname === "RETURN") {
                 if (b > 1) {
-                    let r = [];
-                    for (let i = 0; i < b - 1; i++) r.push(regs[a + i] || getVarName(a + i));
+                    let r =[];
+                    for (let i = 0; i < b - 1; i++) r.push(regs[a + i] || "nil");
                     push(`return ${r.join(", ")}`);
                 } else if (b === 0) push(`return ...`);
                 else push(`return`);
             }
-            else if (opname === "JUMP") {
+            else if (opname === "JUMP" || opname === "JUMPX") {
+                let offset = opname === "JUMPX" ? (raw >> 8) : sbx;
+                let target = pc + offset + 1;
+                if (offset > 0) {
+                    if (endScopes[pc + 1] && endScopes[pc + 1].t !== "else") {
+                        let crossed = false;
+                        for (let i = pc + 2; i <= target; i++) {
+                            if (endScopes[i]) { crossed = true; break; }
+                        }
+                        if (!crossed) {
+                            let moveCount = endScopes[pc + 1].c;
+                            endScopes[pc + 1].t = "else";
+                            endScopes[pc + 1].c = 0;
+                            if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                            endScopes[target].c += moveCount;
+                        } else {
+                            push("break");
+                        }
+                    } else {
+                        push("break");
+                    }
+                }
+            }
+            else if (opname === "JUMPBACK") {
+                let offset = -bx;
+                let target = pc + offset + 1;
+                loopStarts.add(target);
+                if (!endScopes[pc + 1]) endScopes[pc + 1] = { c: 0, t: "end" };
+                endScopes[pc + 1].c++;
+            }
+            else if (opname.startsWith("JUMPIF")) {
+                let fwd = sbx >= 0;
+                let cnd = "";
+                let left = regs[a] || "nil";
+                let right = regs[aux & 0xFF] || "nil";
+                
+                if (opname === "JUMPIF") cnd = fwd ? `not ${left}` : left;
+                else if (opname === "JUMPIFNOT") cnd = fwd ? left : `not ${left}`;
+                else if (opname === "JUMPIFEQ") cnd = fwd ? `${left} ~= ${right}` : `${left} == ${right}`;
+                else if (opname === "JUMPIFNOTEQ") cnd = fwd ? `${left} == ${right}` : `${left} ~= ${right}`;
+                else if (opname === "JUMPIFLE") cnd = fwd ? `${left} > ${right}` : `${left} <= ${right}`;
+                else if (opname === "JUMPIFNOTLE") cnd = fwd ? `${left} <= ${right}` : `${left} > ${right}`;
+                else if (opname === "JUMPIFLT") cnd = fwd ? `${left} >= ${right}` : `${left} < ${right}`;
+                else if (opname === "JUMPIFNOTLT") cnd = fwd ? `${left} < ${right}` : `${left} >= ${right}`;
+                
                 let target = pc + sbx + 1;
-                if (sbx > 0) {
+                if (!fwd) {
+                    push(`if ${cnd} then break end`);
+                } else {
+                    push(`if ${cnd} then`);
                     if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
-                    endScopes[target].t = "else";
                     endScopes[target].c++;
-                    push("else");
                     indnt++;
                 }
             }
-            else if (opname.startsWith("JUMPIF")) {
-                let cond = "";
-                let left = regs[a] || getVarName(a);
-                let right = regs[aux & 0xFF] || getVarName(aux & 0xFF);
-                if (opname === "JUMPIF") cond = left;
-                else if (opname === "JUMPIFNOT") cond = `not ${left}`;
-                else if (opname === "JUMPIFEQ") cond = `${left} == ${right}`;
-                else if (opname === "JUMPIFNOTEQ") cond = `${left} ~= ${right}`;
-                else if (opname === "JUMPIFLE") cond = `${left} <= ${right}`;
-                else if (opname === "JUMPIFNOTLE") cond = `${left} > ${right}`;
-                else if (opname === "JUMPIFLT") cond = `${left} < ${right}`;
-                else if (opname === "JUMPIFNOTLT") cond = `${left} >= ${right}`;
-                push(`if ${cond} then`);
-                let target = pc + sbx + 1;
-                if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
-                endScopes[target].c++;
-                indnt++;
+            else if (opname.startsWith("JUMPXEQ")) {
+                let offset = aux | 0;
+                let fwd = offset >= 0;
+                let kn = p.consts[bx] ? formatK(p.consts[bx]) : "unk";
+                let left = regs[a] || "nil";
+                let cnd = "";
+                
+                if (opname === "JUMPXEQKNIL") cnd = fwd ? `${left} ~= nil` : `${left} == nil`;
+                else if (opname === "JUMPXEQKB") {
+                    let kb = (raw >>> 16) === 1 ? "true" : "false";
+                    cnd = fwd ? `${left} ~= ${kb}` : `${left} == ${kb}`;
+                }
+                else cnd = fwd ? `${left} ~= ${kn}` : `${left} == ${kn}`;
+                          
+                let target = pc + offset + 1;
+                if (!fwd) {
+                    push(`if ${cnd} then break end`);
+                } else {
+                    push(`if ${cnd} then`);
+                    if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                    endScopes[target].c++;
+                    indnt++;
+                }
             }
-            else if (opname === "ADD") regs[a] = `${regs[b] || getVarName(b)} + ${regs[c] || getVarName(c)}`;
-            else if (opname === "SUB") regs[a] = `${regs[b] || getVarName(b)} - ${regs[c] || getVarName(c)}`;
-            else if (opname === "MUL") regs[a] = `${regs[b] || getVarName(b)} * ${regs[c] || getVarName(c)}`;
-            else if (opname === "DIV") regs[a] = `${regs[b] || getVarName(b)} / ${regs[c] || getVarName(c)}`;
-            else if (opname === "MOD") regs[a] = `${regs[b] || getVarName(b)} % ${regs[c] || getVarName(c)}`;
-            else if (opname === "ADDK") regs[a] = `${regs[b] || getVarName(b)} + ${formatK(p.consts[c])}`;
-            else if (opname === "SUBK") regs[a] = `${regs[b] || getVarName(b)} - ${formatK(p.consts[c])}`;
-            else if (opname === "MULK") regs[a] = `${regs[b] || getVarName(b)} * ${formatK(p.consts[c])}`;
-            else if (opname === "DIVK") regs[a] = `${regs[b] || getVarName(b)} / ${formatK(p.consts[c])}`;
+            else if (opname === "ADD") regs[a] = `${regs[b] || "nil"} + ${regs[c] || "nil"}`;
+            else if (opname === "SUB") regs[a] = `${regs[b] || "nil"} - ${regs[c] || "nil"}`;
+            else if (opname === "MUL") regs[a] = `${regs[b] || "nil"} * ${regs[c] || "nil"}`;
+            else if (opname === "DIV") regs[a] = `${regs[b] || "nil"} / ${regs[c] || "nil"}`;
+            else if (opname === "MOD") regs[a] = `${regs[b] || "nil"} % ${regs[c] || "nil"}`;
+            else if (opname === "POW") regs[a] = `${regs[b] || "nil"} ^ ${regs[c] || "nil"}`;
+            else if (opname === "ADDK") regs[a] = `${regs[b] || "nil"} + ${formatK(p.consts[c])}`;
+            else if (opname === "SUBK") regs[a] = `${regs[b] || "nil"} - ${formatK(p.consts[c])}`;
+            else if (opname === "MULK") regs[a] = `${regs[b] || "nil"} * ${formatK(p.consts[c])}`;
+            else if (opname === "DIVK") regs[a] = `${regs[b] || "nil"} / ${formatK(p.consts[c])}`;
+            else if (opname === "MODK") regs[a] = `${regs[b] || "nil"} % ${formatK(p.consts[c])}`;
+            else if (opname === "POWK") regs[a] = `${regs[b] || "nil"} ^ ${formatK(p.consts[c])}`;
+            else if (opname === "AND") regs[a] = `${regs[b] || "nil"} and ${regs[c] || "nil"}`;
+            else if (opname === "OR") regs[a] = `${regs[b] || "nil"} or ${regs[c] || "nil"}`;
+            else if (opname === "ANDK") regs[a] = `${regs[b] || "nil"} and ${formatK(p.consts[c])}`;
+            else if (opname === "ORK") regs[a] = `${regs[b] || "nil"} or ${formatK(p.consts[c])}`;
+            else if (opname === "NOT") regs[a] = `not ${regs[b] || "nil"}`;
+            else if (opname === "MINUS") regs[a] = `-${regs[b] || "nil"}`;
+            else if (opname === "LENGTH") regs[a] = `#${regs[b] || "nil"}`;
             else if (opname === "CONCAT") {
-                let r = [];
-                for (let i = b; i <= c; i++) r.push(regs[i] || getVarName(i));
+                let r =[];
+                for (let i = b; i <= c; i++) r.push(regs[i] || '""');
                 regs[a] = r.join(" .. ");
             }
             else if (opname === "GETUPVAL") regs[a] = p.upvalues[b] || `upval_${b}`;
-            else if (opname === "SETUPVAL") push(`${p.upvalues[b] || `upval_${b}`} = ${regs[a] || getVarName(a)}`);
+            else if (opname === "SETUPVAL") push(`${p.upvalues[b] || `upval_${b}`} = ${regs[a] || "nil"}`);
             else if (opname === "NEWCLOSURE" || opname === "DUPCLOSURE") {
-                let id = opname === "NEWCLOSURE" ? bx : (p.consts[bx] ? p.consts[bx].id : 0);
-                assignVar(a, getProtoCode(id, indnt));
+                let protoIdx = opname === "NEWCLOSURE" ? bx : (p.consts[bx] ? p.consts[bx].id : 0);
+                assignVar(a, getProtoCode(protoIdx, indnt));
             }
-            else if (opname === "NEWTABLE") assignVar(a, "{}");
+            else if (opname === "NEWTABLE" || opname === "DUPTABLE") {
+                assignVar(a, "{}");
+            }
+            else if (opname === "SETLIST") {
+                let count = c - 1;
+                let startIdx = aux; 
+                if (count > 0) {
+                    for (let i = 0; i < count; i++) {
+                        push(`${regs[a]}[${startIdx + i}] = ${regs[b + i] || "nil"}`);
+                    }
+                }
+            }
+            else if (opname === "GETVARARGS") regs[a] = "...";
             else if (opname === "FORNPREP") {
-                push(`for ${getVarName(a + 2)} = ${regs[a] || getVarName(a)}, ${regs[a + 1] || getVarName(a + 1)} do`);
+                let loopVar = getVarName(a + 2);
+                push(`for ${loopVar} = ${regs[a]} or 0, ${regs[a+1]} or 0, ${regs[a+2]} or 1 do`);
                 let target = pc + sbx + 1;
                 if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
                 endScopes[target].c++;
                 indnt++;
             }
-            else if (opname === "JUMPBACK") {
-                indnt = Math.max(0, indnt - 1);
-                push("end");
+            else if (opname === "FORNLOOP") {
             }
-        } catch (e) {}
+            else if (opname.startsWith("FORGPREP")) {
+                let var1 = getVarName(a + 3);
+                let var2 = getVarName(a + 4);
+                push(`for ${var1}, ${var2} in pairs(${regs[a] || "nil"}) do`);
+                let target = pc + sbx + 1;
+                if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                endScopes[target].c++;
+                indnt++;
+            }
+            else if (opname.startsWith("FASTCALL")) {
+            }
+            else {
+                if (!opname.includes("UNKNOWN")) {
+                    regs[a] = `"${opname}"`;
+                }
+            }
+        } catch (e) {
+        }
+
         pc++;
         if (hasAux) pc++;
     }
+    
     return lines.join("\n");
 }
 
@@ -332,39 +452,130 @@ function process(base64str) {
     try {
         let buf = Buffer.from(base64str, 'base64');
         let r = new bufferreader(buf);
+        
         let ob = r.readbyte;
         r.readbyte = function() {
             if (this.offset >= this.length) throw new Error("EOF");
             return ob.call(this);
         };
+        let ou = r.readuint32;
+        r.readuint32 = function() {
+            if (this.offset + 4 > this.length) throw new Error("EOF");
+            return ou.call(this);
+        };
+        let os = r.readstring;
+        r.readstring = function(len) {
+            if (this.offset + len > this.length) throw new Error("EOF");
+            return os.call(this, len);
+        };
+
         let version = r.readbyte();
-        if (version >= 4) r.readbyte();
-        let stringcount = r.readvarint();
-        let strings = [];
-        for (let i = 0; i < stringcount; i++) strings.push(r.readstring(r.readvarint()));
-        let protocount = r.readvarint();
-        let allprotos = [];
-        for (let i = 0; i < protocount; i++) {
-            let res = parseproto(r, strings, version, i, [], layouts[0]);
-            allprotos.push(res);
+        if (version < 3 || version > 7) return "";
+        
+        if (version >= 4) {
+            r.readbyte();
         }
-        let mainindex = r.readvarint();
-        let getProtoCode = (idx, ind) => {
-            let cp = allprotos[idx];
-            if (!cp || cp.code) return cp ? cp.code : "function() end";
-            let args = [];
-            for (let i = 0; i < cp.numparams; i++) {
-                let loc = cp.locvars.find(v => v.reg === i && v.startpc <= 1);
-                args.push(loc ? loc.name : `p${i+1}`);
+        
+        let stringcount = r.readvarint();
+        let strings =[];
+        for (let i = 0; i < stringcount; i++) {
+            let slen = r.readvarint();
+            strings.push(r.readstring(slen));
+        }
+        
+        let originalStringsLength = strings.length;
+        let savedStringsOffset = r.offset;
+        
+        let found = false;
+        let allprotos =[];
+        let mainindex = 0;
+
+        for (let lIdx = 0; lIdx < layouts.length; lIdx++) {
+            let layout = layouts[lIdx];
+            for (let extraStrings = 0; extraStrings <= 15; extraStrings++) {
+                r.offset = savedStringsOffset;
+                strings.length = originalStringsLength;
+                
+                let extraSuccess = true;
+                try {
+                    for(let k = 0; k < extraStrings; k++) {
+                        let slen = r.readvarint();
+                        strings.push(r.readstring(slen));
+                    }
+                } catch(e) {
+                    extraSuccess = false;
+                }
+                if (!extraSuccess) continue;
+                
+                try {
+                    let protocount = r.readvarint();
+                    let tempProtos =[];
+                    let pSuccess = true;
+                    for (let i = 0; i < protocount; i++) {
+                        let p = parseproto(r, strings, version, i,[], layout);
+                        if (!p.success) {
+                            pSuccess = false;
+                            break;
+                        }
+                        tempProtos.push(p);
+                    }
+                    
+                    if (pSuccess) {
+                        let mIdx = r.readvarint();
+                        if (mIdx >= 0 && mIdx < protocount && tempProtos[mIdx] && tempProtos[mIdx].instrs.length > 0) {
+                            let firstOp = tempProtos[mIdx].instrs[0] & 0xFF;
+                            if (opcodes[firstOp] && opcodes[firstOp] !== "UNKNOWN") {
+                                allprotos = tempProtos;
+                                mainindex = mIdx;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
+            if (found) break;
+        }
+
+        if (!found) {
+            return "-- [DECOMPILER ERROR] Invalid main proto index or failed to determine bytecode structure.";
+        }
+        
+        let activeProtos = new Set();
+        let getProtoCode = (pIdx, indnt) => {
+            let cp = allprotos[pIdx];
+            if (!cp) return "function() end";
+            if (activeProtos.has(pIdx)) return `function() end`;
+            if (cp.code) return cp.code;
+            
+            activeProtos.add(pIdx);
+            
+            cp.code = "function() end";
+            let args =[];
+            for (let a = 0; a < cp.numparams; a++) {
+                let name = `v${a + 1}`;
+                if (cp.locvars) {
+                    let loc = cp.locvars.find(v => v.reg === a && v.startpc <= 1);
+                    if (loc) name = loc.name;
+                }
+                args.push(name);
             }
             if (cp.isvararg) args.push("...");
-            cp.code = "function() end";
-            let body = lift(cp, allprotos, ind + 1, getProtoCode);
-            cp.code = `function(${args.join(", ")})\n${body}\n${"    ".repeat(ind)}end`;
+            
+            let body = lift(cp, allprotos, indnt + 1, getProtoCode);
+            let indntStr = "    ".repeat(indnt);
+            cp.code = `function(${args.join(", ")})\n${body}\n${indntStr}end`;
+            
+            activeProtos.delete(pIdx);
             return cp.code;
         };
-        return lift(allprotos[mainindex], allprotos, 0, getProtoCode);
-    } catch (e) { return `-- [FATAL] ${e.message}`; }
+        
+        let finalCode = lift(allprotos[mainindex], allprotos, 0, getProtoCode);
+        return finalCode.length > 0 ? finalCode : "";
+
+    } catch (e) {
+        return "";
+    }
 }
 
 module.exports = { process };
