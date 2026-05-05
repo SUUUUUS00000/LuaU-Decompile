@@ -13,18 +13,13 @@ function parseproto(r, strings, version, protoIdx, trace) {
         
         trace.push(`[Proto ${protoIdx}] stack:${maxstacksize} params:${numparams} upvals:${numupvalues} vararg:${isvararg}`);
         
-        if (version >= 4) {
-            state = "typeinfo";
-            let typesize = r.readvarint();
-            trace.push(`[Proto ${protoIdx}] typesize:${typesize}`);
-            r.offset += typesize;
-        }
-        
         state = "instrcount";
         let instrcount = r.readvarint();
         trace.push(`[Proto ${protoIdx}] instrcount:${instrcount}`);
         let instrs =[];
-        for (let i = 0; i < instrcount; i++) instrs.push(r.readuint32());
+        for (let i = 0; i < instrcount; i++) {
+            instrs.push(r.readuint32());
+        }
         
         state = "constcount";
         let constcount = r.readvarint();
@@ -60,7 +55,9 @@ function parseproto(r, strings, version, protoIdx, trace) {
         let protocount = r.readvarint();
         trace.push(`[Proto ${protoIdx}] subprotocount:${protocount}`);
         let protos =[];
-        for (let i = 0; i < protocount; i++) protos.push(r.readvarint());
+        for (let i = 0; i < protocount; i++) {
+            protos.push(r.readvarint());
+        }
         
         state = "linedefined";
         let linedefined = r.readvarint();
@@ -70,7 +67,7 @@ function parseproto(r, strings, version, protoIdx, trace) {
         state = "lineinfo";
         let hasLineInfo = r.readbyte();
         trace.push(`[Proto ${protoIdx}] hasLineInfo:${hasLineInfo}`);
-        if (hasLineInfo === 1) {
+        if (hasLineInfo !== 0) {
             let linegap = r.readbyte();
             let intervals = instrcount > 0 ? ((instrcount - 1) >> linegap) + 1 : 0;
             r.offset += instrcount + (intervals * 4);
@@ -81,7 +78,7 @@ function parseproto(r, strings, version, protoIdx, trace) {
         trace.push(`[Proto ${protoIdx}] hasDebugInfo:${hasDebugInfo}`);
         let locvars = [];
         let upvalues =[];
-        if (hasDebugInfo === 1) {
+        if (hasDebugInfo !== 0) {
             let locs = r.readvarint();
             for (let i = 0; i < locs; i++) {
                 let n_id = r.readvarint();
@@ -330,7 +327,7 @@ function process(base64str) {
     let trace =[];
     
     let dumpError = (msg) => {
-        let err = `-- [DECOMPILER CRASH]\n-- Reason: ${msg}\n-- Buffer Length: ${r.length}\n-- Current Offset: ${r.offset}\n-- Execution Trace:\n`;
+        let err = `--[DECOMPILER CRASH]\n-- Reason: ${msg}\n-- Buffer Length: ${r.length}\n-- Current Offset: ${r.offset}\n-- Execution Trace:\n`;
         for (let i = Math.max(0, trace.length - 30); i < trace.length; i++) {
             err += `-- > ${trace[i]}\n`;
         }
