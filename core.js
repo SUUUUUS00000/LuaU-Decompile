@@ -1,16 +1,15 @@
 const bufferreader = require('./reader');
 const opcodes = require('./opcodes');
 
-const layouts = [
-    ["instrs", "consts", "protos", "debug"],["consts", "instrs", "protos", "debug"],["consts", "protos", "debug", "instrs"],
-    ["instrs", "protos", "debug", "consts"]
+const layouts =[
+    ["instrs", "consts", "protos", "debug"],["consts", "instrs", "protos", "debug"],["consts", "protos", "debug", "instrs"],["instrs", "protos", "debug", "consts"]
 ];
 
 const aux_opcodes = new Set([
     "GETGLOBAL", "SETGLOBAL", "GETIMPORT", "GETTABLEKS", "SETTABLEKS", "NAMECALL",
     "JUMPIFEQ", "JUMPIFNOTEQ", "JUMPIFLE", "JUMPIFNOTLE", "JUMPIFLT", "JUMPIFNOTLT",
     "JUMPXEQKNIL", "JUMPXEQKB", "JUMPXEQKN", "JUMPXEQKS",
-    "FORGLOOP", "LOADKX", "NEWTABLE", "SETLIST",
+    "FORGLOOP", "LOADKX", "SETLIST",
     "FASTCALL2", "FASTCALL2K", "FASTCALL3"
 ]);
 
@@ -55,8 +54,8 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
         }
         
         let p_instrs = [];
-        let p_consts = [];
-        let p_protos =[];
+        let p_consts =[];
+        let p_protos = [];
         let p_locvars = [];
         let p_upvalues =[];
         let p_protoname = "anonymous";
@@ -97,7 +96,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
                     }
                     else if (type === 6) p_consts.push({ t: 'closure', id: r.readvarint() });
                     else if (type === 7) { r.offset += 16; p_consts.push({ t: 'vector', v: 'Vector3.new()' }); }
-                    else throw new Error(`Unknown const type ${type} at idx ${i} (offset: ${r.offset-1})`);
+                    else throw new Error(`Unknown const type ${type} at idx ${i}`);
                 }
             } else if (block === "protos") {
                 let protocount = r.readvarint();
@@ -184,11 +183,12 @@ function lift(p, allprotos, indnt, getProtoCode) {
 
     while (pc < p.instrs.length) {
         if (endScopes[pc]) {
-            indnt = Math.max(0, indnt - endScopes[pc].c);
             if (endScopes[pc].t === "else") {
+                indnt = Math.max(0, indnt - 1);
                 push("else");
                 indnt++;
-            } else {
+            } else if (endScopes[pc].c > 0) {
+                indnt = Math.max(0, indnt - endScopes[pc].c);
                 for(let i = 0; i < endScopes[pc].c; i++) push("end");
             }
         }
@@ -212,11 +212,12 @@ function lift(p, allprotos, indnt, getProtoCode) {
                 regs[a] = b === 1 ? "true" : "false"; 
                 if (c > 0) {
                     let target = pc + c + 1;
-                    if (endScopes[pc + 1]) {
+                    if (endScopes[pc + 1] && endScopes[pc + 1].t !== "else") {
+                        let moveCount = endScopes[pc + 1].c;
                         endScopes[pc + 1].t = "else";
+                        endScopes[pc + 1].c = 0;
                         if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
-                        endScopes[target].c += endScopes[pc + 1].c;
-                        endScopes[pc + 1].c = 1;
+                        endScopes[target].c += moveCount;
                     }
                 }
             }
@@ -240,15 +241,21 @@ function lift(p, allprotos, indnt, getProtoCode) {
             else if (opname === "CALL") {
                 let f = regs[a];
                 let args =[];
-                let argcount = b === 0 ? 0 : b - 1;
                 let callStr = "";
-                if (f && f.m) {
-                    for (let i = 2; i <= argcount; i++) args.push(regs[a + i] || "nil");
-                    callStr = `${f.obj}:${f.func}(${args.join(", ")})`;
+                if (b === 0) {
+                    args.push("...");
                 } else {
-                    for (let i = 1; i <= argcount; i++) args.push(regs[a + i] || "nil");
-                    callStr = `${typeof f === 'string' ? f : "func"}(${args.join(", ")})`;
+                    let argcount = b - 1;
+                    if (f && f.m) {
+                        for (let i = 2; i <= argcount; i++) args.push(regs[a + i] || "nil");
+                    } else {
+                        for (let i = 1; i <= argcount; i++) args.push(regs[a + i] || "nil");
+                    }
                 }
+                
+                if (f && f.m) callStr = `${f.obj}:${f.func}(${args.join(", ")})`;
+                else callStr = `${typeof f === 'string' ? f : "func"}(${args.join(", ")})`;
+                
                 if (c - 1 === 0) push(callStr); else assignVar(a, callStr);
             }
             else if (opname === "RETURN") {
@@ -263,19 +270,17 @@ function lift(p, allprotos, indnt, getProtoCode) {
                 let offset = opname === "JUMPX" ? (raw >> 8) : sbx;
                 let target = pc + offset + 1;
                 if (offset > 0) {
-                    if (endScopes[pc + 1]) {
+                    if (endScopes[pc + 1] && endScopes[pc + 1].t !== "else") {
                         let crossed = false;
-                        for (let i = pc + 2; i < target; i++) {
-                            if (endScopes[i]) {
-                                crossed = true;
-                                break;
-                            }
+                        for (let i = pc + 2; i <= target; i++) {
+                            if (endScopes[i]) { crossed = true; break; }
                         }
                         if (!crossed) {
+                            let moveCount = endScopes[pc + 1].c;
                             endScopes[pc + 1].t = "else";
+                            endScopes[pc + 1].c = 0;
                             if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
-                            endScopes[target].c += endScopes[pc + 1].c;
-                            endScopes[pc + 1].c = 1;
+                            endScopes[target].c += moveCount;
                         } else {
                             push("break");
                         }
@@ -285,21 +290,22 @@ function lift(p, allprotos, indnt, getProtoCode) {
                 }
             }
             else if (opname.startsWith("JUMPIF")) {
+                let fwd = sbx >= 0;
                 let cnd = "";
                 let left = regs[a] || "nil";
                 let right = regs[aux & 0xFF] || "nil";
                 
-                if (opname === "JUMPIF") cnd = `not ${left}`;
-                else if (opname === "JUMPIFNOT") cnd = left;
-                else if (opname === "JUMPIFEQ") cnd = `${left} ~= ${right}`;
-                else if (opname === "JUMPIFNOTEQ") cnd = `${left} == ${right}`;
-                else if (opname === "JUMPIFLE") cnd = `${left} > ${right}`;
-                else if (opname === "JUMPIFNOTLE") cnd = `${left} <= ${right}`;
-                else if (opname === "JUMPIFLT") cnd = `${left} >= ${right}`;
-                else if (opname === "JUMPIFNOTLT") cnd = `${left} < ${right}`;
+                if (opname === "JUMPIF") cnd = fwd ? `not ${left}` : left;
+                else if (opname === "JUMPIFNOT") cnd = fwd ? left : `not ${left}`;
+                else if (opname === "JUMPIFEQ") cnd = fwd ? `${left} ~= ${right}` : `${left} == ${right}`;
+                else if (opname === "JUMPIFNOTEQ") cnd = fwd ? `${left} == ${right}` : `${left} ~= ${right}`;
+                else if (opname === "JUMPIFLE") cnd = fwd ? `${left} > ${right}` : `${left} <= ${right}`;
+                else if (opname === "JUMPIFNOTLE") cnd = fwd ? `${left} <= ${right}` : `${left} > ${right}`;
+                else if (opname === "JUMPIFLT") cnd = fwd ? `${left} >= ${right}` : `${left} < ${right}`;
+                else if (opname === "JUMPIFNOTLT") cnd = fwd ? `${left} < ${right}` : `${left} >= ${right}`;
                 
                 let target = pc + sbx + 1;
-                if (sbx < 0) {
+                if (!fwd) {
                     push(`if ${cnd} then end`);
                 } else {
                     push(`if ${cnd} then`);
@@ -309,14 +315,17 @@ function lift(p, allprotos, indnt, getProtoCode) {
                 }
             }
             else if (opname.startsWith("JUMPXEQ")) {
+                let fwd = sbx >= 0;
                 let kn = formatK(auxVal);
                 let left = regs[a] || "nil";
-                let cnd = opname === "JUMPXEQKNIL" ? `${left} ~= nil` :
-                          opname === "JUMPXEQKB" ? `${left} ~= true` :
-                          `${left} ~= ${kn}`;
+                let cnd = "";
+                
+                if (opname === "JUMPXEQKNIL") cnd = fwd ? `${left} ~= nil` : `${left} == nil`;
+                else if (opname === "JUMPXEQKB") cnd = fwd ? `${left} ~= true` : `${left} == true`;
+                else cnd = fwd ? `${left} ~= ${kn}` : `${left} == ${kn}`;
                           
                 let target = pc + sbx + 1;
-                if (sbx < 0) {
+                if (!fwd) {
                     push(`if ${cnd} then end`);
                 } else {
                     push(`if ${cnd} then`);
@@ -369,7 +378,7 @@ function lift(p, allprotos, indnt, getProtoCode) {
             }
             else if (opname === "GETVARARGS") regs[a] = "...";
             else if (opname === "FORNPREP") {
-                let loopVar = getVarName(a + 3);
+                let loopVar = getVarName(a + 2);
                 push(`for ${loopVar} = ${regs[a+2] || "nil"}, ${regs[a] || "nil"}, ${regs[a+1] || "nil"} do`);
                 let target = pc + sbx + 1;
                 if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
@@ -402,6 +411,25 @@ function process(base64str) {
     }
     
     let r = new bufferreader(buf);
+    let ob = r.readbyte;
+    r.readbyte = function() {
+        if (this.offset >= this.length) throw new Error("EOF");
+        return ob.call(this);
+    };
+    let ou = r.readuint32;
+    r.readuint32 = function() {
+        if (this.offset + 4 > this.length) throw new Error("EOF");
+        return ou.call(this);
+    };
+    let os = r.readstring;
+    r.readstring = function(len) {
+        if (this.offset + len > this.length) throw new Error("EOF");
+        return os.call(this, len);
+    };
+    let ov = r.readvarint;
+    r.readvarint = function() {
+        return ov.call(this);
+    };
     
     try {
         let version = r.readbyte();
