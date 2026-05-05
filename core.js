@@ -1,7 +1,7 @@
 const bufferreader = require('./reader');
 const opcodes = require('./opcodes');
 
-function parseproto(r, strings, version, protoIdx) {
+function parseproto(r, strings, version, protoIdx, trace) {
     let state = "init";
     let startOffset = r.offset;
     try {
@@ -11,22 +11,24 @@ function parseproto(r, strings, version, protoIdx) {
         let numupvalues = r.readbyte();
         let isvararg = r.readbyte();
         
+        trace.push(`[Proto ${protoIdx}] stack:${maxstacksize} params:${numparams} upvals:${numupvalues} vararg:${isvararg}`);
+        
         if (version >= 4) {
             state = "typeinfo";
-            let flags = r.readbyte();
             let typesize = r.readvarint();
+            trace.push(`[Proto ${protoIdx}] typesize:${typesize}`);
             r.offset += typesize;
         }
         
         state = "instrcount";
         let instrcount = r.readvarint();
+        trace.push(`[Proto ${protoIdx}] instrcount:${instrcount}`);
         let instrs =[];
-        for (let i = 0; i < instrcount; i++) {
-            instrs.push(r.readuint32());
-        }
+        for (let i = 0; i < instrcount; i++) instrs.push(r.readuint32());
         
         state = "constcount";
         let constcount = r.readvarint();
+        trace.push(`[Proto ${protoIdx}] constcount:${constcount}`);
         let consts =[];
         for (let i = 0; i < constcount; i++) {
             let type = r.readbyte();
@@ -51,15 +53,14 @@ function parseproto(r, strings, version, protoIdx) {
             }
             else if (type === 6) consts.push({ t: 'closure', id: r.readvarint() });
             else if (type === 7) { r.offset += 16; consts.push({ t: 'vector', v: 'Vector3.new()' }); }
-            else throw new Error(`Unknown type ${type}`);
+            else throw new Error(`Unknown const type ${type} at idx ${i}`);
         }
         
         state = "protocount";
         let protocount = r.readvarint();
+        trace.push(`[Proto ${protoIdx}] subprotocount:${protocount}`);
         let protos =[];
-        for (let i = 0; i < protocount; i++) {
-            protos.push(r.readvarint());
-        }
+        for (let i = 0; i < protocount; i++) protos.push(r.readvarint());
         
         state = "linedefined";
         let linedefined = r.readvarint();
@@ -68,6 +69,7 @@ function parseproto(r, strings, version, protoIdx) {
         
         state = "lineinfo";
         let hasLineInfo = r.readbyte();
+        trace.push(`[Proto ${protoIdx}] hasLineInfo:${hasLineInfo}`);
         if (hasLineInfo === 1) {
             let linegap = r.readbyte();
             let intervals = instrcount > 0 ? ((instrcount - 1) >> linegap) + 1 : 0;
@@ -76,6 +78,7 @@ function parseproto(r, strings, version, protoIdx) {
         
         state = "debuginfo";
         let hasDebugInfo = r.readbyte();
+        trace.push(`[Proto ${protoIdx}] hasDebugInfo:${hasDebugInfo}`);
         let locvars = [];
         let upvalues =[];
         if (hasDebugInfo === 1) {
@@ -96,7 +99,7 @@ function parseproto(r, strings, version, protoIdx) {
         
         return { numparams, isvararg, instrs, consts, protos, protoname, locvars, upvalues, success: true, parsed: r.offset - startOffset };
     } catch (e) {
-        return { success: false, error: e.message, state: state, offset: r.offset, protoIdx: protoIdx };
+        return { success: false, error: e.message, state: state, offset: r.offset };
     }
 }
 
@@ -320,14 +323,37 @@ function process(base64str) {
     try {
         buf = Buffer.from(base64str, 'base64');
     } catch (e) {
-        return `--[DECOMPILER CRASH]\n-- Reason: Failed to decode base64 buffer\n-- Message: ${e.message}`;
+        return `-- [DECOMPILER CRASH]\n-- Reason: Failed to decode base64 buffer\n-- Message: ${e.message}`;
     }
     
     let r = new bufferreader(buf);
     let trace =[];
     
     let dumpError = (msg) => {
-        return `-- [DECOMPILER CRASH]\n-- Reason: ${msg}\n-- Buffer Length: ${r.length}\n-- Current Offset: ${r.offset}\n-- Execution Trace:\n-- > ` + trace.join("\n-- > ");
+        let err = `-- [DECOMPILER CRASH]\n-- Reason: ${msg}\n-- Buffer Length: ${r.length}\n-- Current Offset: ${r.offset}\n-- Execution Trace:\n`;
+        for (let i = Math.max(0, trace.length - 30); i < trace.length; i++) {
+            err += `-- > ${trace[i]}\n`;
+        }
+        let start = Math.max(0, r.offset - 64);
+        let end = Math.min(r.length, r.offset + 128);
+        err += `-- Hex Dump (${start} to ${end}):\n`;
+        let hexLines =[];
+        let currentLine = "";
+        for (let i = start; i < end; i++) {
+            let byteStr = buf[i].toString(16).padStart(2, '0');
+            if (i === r.offset) {
+                currentLine += `>>${byteStr}<< `;
+            } else {
+                currentLine += `${byteStr} `;
+            }
+            if ((i - start + 1) % 16 === 0) {
+                hexLines.push("-- " + currentLine);
+                currentLine = "";
+            }
+        }
+        if (currentLine.length > 0) hexLines.push("-- " + currentLine);
+        err += hexLines.join('\n');
+        return err;
     };
 
     try {
@@ -357,9 +383,10 @@ function process(base64str) {
         
         let allprotos =[];
         for (let i = 0; i < protocount; i++) {
-            let p = parseproto(r, strings, version, i);
+            trace.push(`Parsing Proto [${i}] at offset ${r.offset}`);
+            let p = parseproto(r, strings, version, i, trace);
             if (!p.success) {
-                return dumpError(`Proto [${i}] crash during: ${p.state}. Error: ${p.error}. Offset stopped at ${p.offset}`);
+                return dumpError(`Proto [${i}] crash during: ${p.state}. Error: ${p.error}`);
             }
             trace.push(`Proto [${i}] parsed (${p.parsed} bytes)`);
             allprotos.push(p);
