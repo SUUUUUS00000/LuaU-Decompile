@@ -1,152 +1,148 @@
 const bufferreader = require('./reader');
 const opcodes = require('./opcodes');
 
-function parseproto(r, strings, version, protoIdx, trace, layout) {
-    let state = "init";
-    let startOffset = r.offset;
-    try {
-        state = "maxstacksize";
-        let maxstacksize = r.readbyte();
-        let numparams = r.readbyte();
-        let numupvalues = r.readbyte();
-        let isvararg = r.readbyte();
-        
-        if (trace) trace.push(`[Proto ${protoIdx}] stack:${maxstacksize} params:${numparams} upvals:${numupvalues} vararg:${isvararg}`);
-        
-        if (version >= 4) {
-            state = "typeinfo";
-            let typeinfoFlags = r.readbyte();
-            if (trace) trace.push(`[Proto ${protoIdx}] typeinfoFlags:${typeinfoFlags}`);
-            if (typeinfoFlags > 0) {
-                let typesize = r.readvarint();
-                if (trace) trace.push(`[Proto ${protoIdx}] typesize:${typesize}`);
-                r.offset += typesize;
-            }
-            if (version >= 7) {
-                let unk1 = r.readvarint();
-                let unk2 = r.readvarint();
-                if (trace) trace.push(`[Proto ${protoIdx}] v7_extravars: ${unk1}, ${unk2}`);
-            }
-        }
+const LAYOUTS = [
+    ["instrs", "consts", "protos", "debug"],["consts", "instrs", "protos", "debug"],["consts", "protos", "debug", "instrs"],
+    ["instrs", "protos", "debug", "consts"]
+];
 
-        let instrcount = 0;
-        let instrs =[];
-
-        if (layout === "standard") {
-            state = "instrcount";
-            instrcount = r.readvarint();
-            if (trace) trace.push(`[Proto ${protoIdx}] instrcount:${instrcount}`);
-            for (let i = 0; i < instrcount; i++) {
-                instrs.push(r.readuint32());
-            }
-        }
-        
-        state = "constcount";
-        let constcount = r.readvarint();
-        if (trace) trace.push(`[Proto ${protoIdx}] constcount:${constcount}`);
-        let consts =[];
-        for (let i = 0; i < constcount; i++) {
-            let type = r.readbyte();
-            if (type === 0) consts.push({ t: 'nil', v: 'nil' });
-            else if (type === 1) consts.push({ t: 'bool', v: r.readbyte() === 1 });
-            else if (type === 2) { consts.push({ t: 'num', v: r.buffer.readDoubleLE(r.offset) }); r.offset += 8; }
-            else if (type === 3) consts.push({ t: 'str', v: strings[r.readvarint() - 1] || "" });
-            else if (type === 4) {
-                let id = r.readuint32();
-                let count = id >>> 30;
-                let arr =[];
-                let getval = (idx) => { let c = consts[idx]; return c ? (c.t === 'str' ? c.v : c.v) : ""; };
-                if (count > 0) arr.push(getval((id >> 20) & 1023));
-                if (count > 1) arr.push(getval((id >> 10) & 1023));
-                if (count > 2) arr.push(getval(id & 1023));
-                consts.push({ t: 'import', v: arr.join(".") });
-            }
-            else if (type === 5) {
-                let sz = r.readvarint();
-                for(let j = 0; j < sz; j++) r.readvarint();
-                consts.push({ t: 'table', v: '{}' });
-            }
-            else if (type === 6) consts.push({ t: 'closure', id: r.readvarint() });
-            else if (type === 7) { r.offset += 16; consts.push({ t: 'vector', v: 'Vector3.new()' }); }
-            else throw new Error(`Unknown const type ${type} at idx ${i} (offset: ${r.offset})`);
-        }
-        
-        state = "protocount";
-        let protocount = r.readvarint();
-        if (trace) trace.push(`[Proto ${protoIdx}] subprotocount:${protocount}`);
-        let protos =[];
-        for (let i = 0; i < protocount; i++) {
-            protos.push(r.readvarint());
-        }
-        
-        state = "linedefined";
-        let linedefined = r.readvarint();
-        let nameid = r.readvarint();
-        let protoname = nameid > 0 ? strings[nameid - 1] : "anonymous";
-        
-        state = "lineinfo";
-        let hasLineInfo = r.readbyte();
-        if (trace) trace.push(`[Proto ${protoIdx}] hasLineInfo:${hasLineInfo}`);
-        let linegap = 0;
-        if (hasLineInfo !== 0) {
-            linegap = r.readbyte();
-        }
-
-        if (layout === "standard" && hasLineInfo !== 0) {
-            let intervals = instrcount > 0 ? ((instrcount - 1) >> linegap) + 1 : 0;
-            r.offset += instrcount + (intervals * 4);
-        }
-        
-        state = "debuginfo";
-        let hasDebugInfo = r.readbyte();
-        if (trace) trace.push(`[Proto ${protoIdx}] hasDebugInfo:${hasDebugInfo}`);
-        let locvars = [];
-        let upvalues =[];
-        if (hasDebugInfo !== 0) {
-            let locs = r.readvarint();
-            for (let i = 0; i < locs; i++) {
-                let n_id = r.readvarint();
-                let startpc = r.readvarint();
-                let endpc = r.readvarint();
-                let reg = r.readbyte();
-                locvars.push({ name: strings[n_id - 1] || "v" + reg, startpc, endpc, reg });
-            }
-            let upvs = r.readvarint();
-            for (let i = 0; i < upvs; i++) {
-                let n_id = r.readvarint();
-                upvalues.push(strings[n_id - 1] || "upval_" + i);
-            }
-        }
-
-        if (layout === "modified") {
-            state = "instrcount";
-            instrcount = r.readvarint();
-            if (trace) trace.push(`[Proto ${protoIdx}] delayed instrcount:${instrcount}`);
-            for (let i = 0; i < instrcount; i++) {
-                instrs.push(r.readuint32());
-            }
-            if (hasLineInfo !== 0) {
-                let intervals = instrcount > 0 ? ((instrcount - 1) >> linegap) + 1 : 0;
-                r.offset += instrcount + (intervals * 4);
-            }
-        }
-        
-        return { numparams, isvararg, instrs, consts, protos, protoname, locvars, upvalues, success: true, parsed: r.offset - startOffset };
-    } catch (e) {
-        return { success: false, error: e.message, state: state, offset: r.offset };
-    }
+function formatKVal(k) {
+    if (!k) return "nil";
+    if (k.t === 'str') return k.v;
+    if (k.t === 'closure') return `closure_${k.id}`;
+    if (k.t === 'table') return `{}`;
+    if (k.t === 'import') return k.v;
+    if (k.t === 'bool') return k.v ? "true" : "false";
+    return k.v !== undefined ? k.v : "nil";
 }
 
 function formatK(k) {
     if (!k) return "nil";
     if (k.t === 'str') return `"${k.v.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"`;
     if (k.t === 'bool') return k.v ? "true" : "false";
-    return k.v;
+    if (k.t === 'closure') return `closure_${k.id}`;
+    if (k.t === 'table') return `{}`;
+    if (k.t === 'import') return k.v;
+    return k.v !== undefined ? k.v : "nil";
 }
 
-function formatKVal(k) {
-    if (!k) return "nil";
-    return k.v;
+function parseproto(r, strings, version, protoIdx, trace, layout) {
+    let startOffset = r.offset;
+    try {
+        let maxstacksize = r.readbyte();
+        let numparams = r.readbyte();
+        let numupvalues = r.readbyte();
+        let isvararg = r.readbyte();
+        
+        if (version >= 4) {
+            let typeinfoFlags = r.readbyte();
+            if (typeinfoFlags > 0) {
+                let typesize = r.readvarint();
+                r.offset += typesize;
+            }
+            if (version >= 7) {
+                r.readvarint();
+                r.readvarint();
+            }
+        }
+        
+        let p_instrs =[];
+        let p_consts = [];
+        let p_protos = [];
+        let p_locvars =[];
+        let p_upvalues =[];
+        let p_protoname = "anonymous";
+
+        for (let block of layout) {
+            if (block === "instrs") {
+                let instrcount = r.readvarint();
+                for (let i = 0; i < instrcount; i++) {
+                    p_instrs.push(r.readuint32());
+                }
+            } else if (block === "consts") {
+                let constcount = r.readvarint();
+                for (let i = 0; i < constcount; i++) {
+                    let type = r.readbyte();
+                    if (type === 0) p_consts.push({ t: 'nil', v: 'nil' });
+                    else if (type === 1) p_consts.push({ t: 'bool', v: r.readbyte() === 1 });
+                    else if (type === 2) { p_consts.push({ t: 'num', v: r.buffer.readDoubleLE(r.offset) }); r.offset += 8; }
+                    else if (type === 3) p_consts.push({ t: 'str', v: strings[r.readvarint() - 1] || "" });
+                    else if (type === 4) {
+                        let id = r.readuint32();
+                        let count = id >>> 30;
+                        let arr =[];
+                        let getval = (idx) => { 
+                            let c = p_consts[idx]; 
+                            if (!c) return `unk_${idx}`;
+                            if (c.t === 'str') return c.v;
+                            return formatKVal(c); 
+                        };
+                        if (count > 0) arr.push(getval((id >> 20) & 1023));
+                        if (count > 1) arr.push(getval((id >> 10) & 1023));
+                        if (count > 2) arr.push(getval(id & 1023));
+                        p_consts.push({ t: 'import', v: arr.join(".") });
+                    }
+                    else if (type === 5) {
+                        let sz = r.readvarint();
+                        for(let j = 0; j < sz; j++) r.readvarint();
+                        p_consts.push({ t: 'table', v: '{}' });
+                    }
+                    else if (type === 6) p_consts.push({ t: 'closure', id: r.readvarint() });
+                    else if (type === 7) { r.offset += 16; p_consts.push({ t: 'vector', v: 'Vector3.new()' }); }
+                    else throw new Error(`Unknown const type ${type} at idx ${i} (offset: ${r.offset-1})`);
+                }
+            } else if (block === "protos") {
+                let protocount = r.readvarint();
+                for (let i = 0; i < protocount; i++) {
+                    p_protos.push(r.readvarint());
+                }
+            } else if (block === "debug") {
+                let linedefined = r.readvarint();
+                let nameid = r.readvarint();
+                p_protoname = nameid > 0 ? strings[nameid - 1] : "anonymous";
+                
+                let hasLineInfo = r.readbyte();
+                if (hasLineInfo !== 0) {
+                    let linegap = r.readbyte();
+                    let ic = p_instrs.length;
+                    let intervals = ic > 0 ? ((ic - 1) >> linegap) + 1 : 0;
+                    r.offset += ic + (intervals * 4);
+                }
+                
+                let hasDebugInfo = r.readbyte();
+                if (hasDebugInfo !== 0) {
+                    let locs = r.readvarint();
+                    for (let i = 0; i < locs; i++) {
+                        let n_id = r.readvarint();
+                        let startpc = r.readvarint();
+                        let endpc = r.readvarint();
+                        let reg = r.readbyte();
+                        p_locvars.push({ name: strings[n_id - 1] || "v" + reg, startpc, endpc, reg });
+                    }
+                    let upvs = r.readvarint();
+                    for (let i = 0; i < upvs; i++) {
+                        let n_id = r.readvarint();
+                        p_upvalues.push(strings[n_id - 1] || "upval_" + i);
+                    }
+                }
+            }
+        }
+        
+        return { 
+            numparams, 
+            isvararg, 
+            instrs: p_instrs, 
+            consts: p_consts, 
+            protos: p_protos, 
+            protoname: p_protoname, 
+            locvars: p_locvars, 
+            upvalues: p_upvalues, 
+            success: true, 
+            parsed: r.offset - startOffset 
+        };
+    } catch (e) {
+        return { success: false, error: e.message, offset: r.offset };
+    }
 }
 
 function lift(p, allprotos, indnt) {
@@ -362,23 +358,14 @@ function process(base64str) {
     
     let r = new bufferreader(buf);
     let trace =[];
-    let backtrackErrors = [];
     
     let dumpError = (msg) => {
-        let err = `--[DECOMPILER CRASH]\n-- Reason: ${msg}\n-- Buffer Length: ${r.length}\n-- Current Offset: ${r.offset}\n-- Execution Trace:\n`;
-        for (let i = Math.max(0, trace.length - 40); i < trace.length; i++) {
+        let err = `-- [DECOMPILER CRASH]\n-- Reason: ${msg}\n-- Buffer Length: ${r.length}\n-- Current Offset: ${r.offset}\n-- Execution Trace:\n`;
+        for (let i = Math.max(0, trace.length - 30); i < trace.length; i++) {
             err += `-- > ${trace[i]}\n`;
         }
-        
-        if (backtrackErrors.length > 0) {
-            err += `-- Backtrack Failures:\n`;
-            for (let be of backtrackErrors) {
-                err += `-- > ${be}\n`;
-            }
-        }
-
         let start = Math.max(0, r.offset - 64);
-        let end = Math.min(r.length, r.offset + 1024);
+        let end = Math.min(r.length, r.offset + 128);
         err += `-- Hex Dump (${start} to ${end}):\n`;
         let hexLines =[];
         let currentLine = "";
@@ -428,8 +415,11 @@ function process(base64str) {
         let allprotos =[];
         let mainindex = 0;
 
-        for (let layout of ["standard", "modified"]) {
-            for (let extraStrings = 0; extraStrings < 5; extraStrings++) {
+        trace.push("Backtrack Failures:");
+
+        for (let lIdx = 0; lIdx < LAYOUTS.length; lIdx++) {
+            let layout = LAYOUTS[lIdx];
+            for (let extraStrings = 0; extraStrings <= 15; extraStrings++) {
                 r.offset = savedStringsOffset;
                 strings.length = originalStringsLength;
                 
@@ -451,7 +441,7 @@ function process(base64str) {
                     for (let i = 0; i < protocount; i++) {
                         let p = parseproto(r, strings, version, i,[], layout);
                         if (!p.success) {
-                            backtrackErrors.push(`L:${layout} ES:${extraStrings} P:${i} FAILED at ${p.state}: ${p.error}`);
+                            trace.push(`-- > L:${lIdx} ES:${extraStrings} P:${i} FAILED: ${p.error}`);
                             pSuccess = false;
                             break;
                         }
@@ -466,11 +456,11 @@ function process(base64str) {
                             found = true;
                             break;
                         } else {
-                            backtrackErrors.push(`L:${layout} ES:${extraStrings} FAILED: mIdx ${mIdx} out of bounds (protocount ${protocount})`);
+                            trace.push(`-- > L:${lIdx} ES:${extraStrings} FAILED: mIdx ${mIdx} out of bounds (protocount ${protocount})`);
                         }
                     }
                 } catch (e) {
-                    backtrackErrors.push(`L:${layout} ES:${extraStrings} FAILED FATAL: ${e.message}`);
+                    trace.push(`-- > L:${lIdx} ES:${extraStrings} FAILED FATAL: ${e.message}`);
                 }
             }
             if (found) break;
@@ -481,7 +471,7 @@ function process(base64str) {
             strings.length = originalStringsLength;
             let protocount = r.readvarint();
             for (let i = 0; i < protocount; i++) {
-                let p = parseproto(r, strings, version, i, trace, "standard");
+                let p = parseproto(r, strings, version, i, trace, ["instrs", "consts", "protos", "debug"]);
                 if (!p.success) {
                     return dumpError(`Proto [${i}] crash during: ${p.state}. Error: ${p.error}`);
                 }
