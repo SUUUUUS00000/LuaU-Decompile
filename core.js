@@ -2,8 +2,7 @@ const bufferreader = require('./reader');
 const opcodes = require('./opcodes');
 
 const layouts = [
-    ["instrs", "consts", "protos", "debug"],["consts", "instrs", "protos", "debug"],
-    ["consts", "protos", "debug", "instrs"],
+    ["instrs", "consts", "protos", "debug"],["consts", "instrs", "protos", "debug"],["consts", "protos", "debug", "instrs"],
     ["instrs", "protos", "debug", "consts"]
 ];
 
@@ -11,7 +10,7 @@ const aux_opcodes = new Set([
     "GETGLOBAL", "SETGLOBAL", "GETIMPORT", "GETTABLEKS", "SETTABLEKS", "NAMECALL",
     "JUMPIFEQ", "JUMPIFNOTEQ", "JUMPIFLE", "JUMPIFNOTLE", "JUMPIFLT", "JUMPIFNOTLT",
     "JUMPXEQKNIL", "JUMPXEQKB", "JUMPXEQKN", "JUMPXEQKS",
-    "FORGPREP", "FORGPREP_INEXT", "FORGPREP_NEXT", "SETLIST", "LOADKX",
+    "FORGLOOP", "LOADKX", "NEWTABLE", "SETLIST",
     "FASTCALL2", "FASTCALL2K", "FASTCALL3"
 ]);
 
@@ -79,7 +78,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
                     else if (type === 4) {
                         let id = r.readuint32();
                         let count = id >>> 30;
-                        let arr = [];
+                        let arr =[];
                         let getval = (idx) => { 
                             let c = p_consts[idx]; 
                             if (!c) return `unk_${idx}`;
@@ -201,7 +200,7 @@ function lift(p, allprotos, indnt, getProtoCode) {
         let b = (raw >>> 16) & 0xFF;
         let c = (raw >>> 24) & 0xFF;
         let bx = (raw >>> 16) & 0xFFFF;
-        let sbx = bx - 32768;
+        let sbx = raw >> 16;
 
         let hasAux = aux_opcodes.has(opname);
         let aux = hasAux ? (p.instrs[pc + 1] || 0) : 0;
@@ -213,8 +212,12 @@ function lift(p, allprotos, indnt, getProtoCode) {
                 regs[a] = b === 1 ? "true" : "false"; 
                 if (c > 0) {
                     let target = pc + c + 1;
-                    if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
-                    endScopes[target].t = "else";
+                    if (endScopes[pc + 1]) {
+                        endScopes[pc + 1].t = "else";
+                        if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                        endScopes[target].c += endScopes[pc + 1].c;
+                        endScopes[pc + 1].c = 1;
+                    }
                 }
             }
             else if (opname === "LOADN") regs[a] = sbx;
@@ -256,19 +259,29 @@ function lift(p, allprotos, indnt, getProtoCode) {
                 } else if (b === 0) push(`return ...`);
                 else push(`return`);
             }
-            else if (opname === "JUMP" || opname === "JUMPX") {
-                let offset = sbx;
-                if (opname === "JUMPX") {
-                    offset = raw >>> 8;
-                    if (offset & 0x800000) offset -= 0x1000000;
-                }
+            else if (opname === "JUMP" || opname === "JUMPX" || opname === "JUMPBACK") {
+                let offset = opname === "JUMPX" ? (raw >> 8) : sbx;
                 let target = pc + offset + 1;
-                if (offset < 0) {
-                    push("end");
-                    indnt = Math.max(0, indnt - 1);
-                } else {
-                    if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
-                    endScopes[target].t = "else";
+                if (offset > 0) {
+                    if (endScopes[pc + 1]) {
+                        let crossed = false;
+                        for (let i = pc + 2; i < target; i++) {
+                            if (endScopes[i]) {
+                                crossed = true;
+                                break;
+                            }
+                        }
+                        if (!crossed) {
+                            endScopes[pc + 1].t = "else";
+                            if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                            endScopes[target].c += endScopes[pc + 1].c;
+                            endScopes[pc + 1].c = 1;
+                        } else {
+                            push("break");
+                        }
+                    } else {
+                        push("break");
+                    }
                 }
             }
             else if (opname.startsWith("JUMPIF")) {
@@ -285,11 +298,15 @@ function lift(p, allprotos, indnt, getProtoCode) {
                 else if (opname === "JUMPIFLT") cnd = `${left} >= ${right}`;
                 else if (opname === "JUMPIFNOTLT") cnd = `${left} < ${right}`;
                 
-                push(`if ${cnd} then`);
                 let target = pc + sbx + 1;
-                if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
-                endScopes[target].c++;
-                indnt++;
+                if (sbx < 0) {
+                    push(`if ${cnd} then end`);
+                } else {
+                    push(`if ${cnd} then`);
+                    if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                    endScopes[target].c++;
+                    indnt++;
+                }
             }
             else if (opname.startsWith("JUMPXEQ")) {
                 let kn = formatK(auxVal);
@@ -297,11 +314,16 @@ function lift(p, allprotos, indnt, getProtoCode) {
                 let cnd = opname === "JUMPXEQKNIL" ? `${left} ~= nil` :
                           opname === "JUMPXEQKB" ? `${left} ~= true` :
                           `${left} ~= ${kn}`;
-                push(`if ${cnd} then`);
+                          
                 let target = pc + sbx + 1;
-                if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
-                endScopes[target].c++;
-                indnt++;
+                if (sbx < 0) {
+                    push(`if ${cnd} then end`);
+                } else {
+                    push(`if ${cnd} then`);
+                    if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                    endScopes[target].c++;
+                    indnt++;
+                }
             }
             else if (opname === "ADD") regs[a] = `${regs[b] || "nil"} + ${regs[c] || "nil"}`;
             else if (opname === "SUB") regs[a] = `${regs[b] || "nil"} - ${regs[c] || "nil"}`;
@@ -347,7 +369,7 @@ function lift(p, allprotos, indnt, getProtoCode) {
             }
             else if (opname === "GETVARARGS") regs[a] = "...";
             else if (opname === "FORNPREP") {
-                let loopVar = getVarName(a + 2);
+                let loopVar = getVarName(a + 3);
                 push(`for ${loopVar} = ${regs[a+2] || "nil"}, ${regs[a] || "nil"}, ${regs[a+1] || "nil"} do`);
                 let target = pc + sbx + 1;
                 if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
