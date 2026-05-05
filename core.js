@@ -1,16 +1,22 @@
 const bufferreader = require('./reader');
 const opcodes = require('./opcodes');
 
-const layouts =[
-    ["instrs", "consts", "protos", "debug"],["consts", "instrs", "protos", "debug"],["consts", "protos", "debug", "instrs"],["instrs", "protos", "debug", "consts"]
-];
+const layouts = [];
+const permute = (arr, m =[]) => {
+    if (arr.length === 0) layouts.push(m);
+    else for (let i = 0; i < arr.length; i++) {
+        let curr = arr.slice();
+        let next = curr.splice(i, 1);
+        permute(curr, m.concat(next));
+    }
+};
+permute(["instrs", "consts", "protos", "debug"]);
 
 const aux_opcodes = new Set([
     "GETGLOBAL", "SETGLOBAL", "GETIMPORT", "GETTABLEKS", "SETTABLEKS", "NAMECALL",
     "JUMPIFEQ", "JUMPIFNOTEQ", "JUMPIFLE", "JUMPIFNOTLE", "JUMPIFLT", "JUMPIFNOTLT",
     "JUMPXEQKNIL", "JUMPXEQKB", "JUMPXEQKN", "JUMPXEQKS",
-    "FORGLOOP", "LOADKX", "SETLIST",
-    "FASTCALL2", "FASTCALL2K", "FASTCALL3"
+    "FORGLOOP", "LOADKX", "SETLIST"
 ]);
 
 function formatKVal(k) {
@@ -41,24 +47,29 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
         let numupvalues = r.readbyte();
         let isvararg = r.readbyte();
         
+        let p_linedefined = 0;
+        let p_nameid = 0;
+        let p_protoname = "anonymous";
+
         if (version >= 4) {
             let typeinfoFlags = r.readbyte();
             if (typeinfoFlags > 0) {
                 let typesize = r.readvarint();
                 r.offset += typesize;
             }
-            if (version >= 7) {
-                r.readvarint();
-                r.readvarint();
-            }
         }
         
-        let p_instrs = [];
-        let p_consts =[];
+        if (version >= 7) {
+            p_linedefined = r.readvarint();
+            p_nameid = r.readvarint();
+            if (p_nameid > 0) p_protoname = strings[p_nameid - 1] || "anonymous";
+        }
+        
+        let p_instrs =[];
+        let p_consts = [];
         let p_protos = [];
-        let p_locvars = [];
+        let p_locvars =[];
         let p_upvalues =[];
-        let p_protoname = "anonymous";
 
         for (let block of layout) {
             if (block === "instrs") {
@@ -72,7 +83,11 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
                     let type = r.readbyte();
                     if (type === 0) p_consts.push({ t: 'nil', v: 'nil' });
                     else if (type === 1) p_consts.push({ t: 'bool', v: r.readbyte() === 1 });
-                    else if (type === 2) { p_consts.push({ t: 'num', v: r.buffer.readDoubleLE(r.offset) }); r.offset += 8; }
+                    else if (type === 2) { 
+                        if (r.offset + 8 > r.length) throw new Error("EOF");
+                        p_consts.push({ t: 'num', v: r.buffer.readDoubleLE(r.offset) }); 
+                        r.offset += 8; 
+                    }
                     else if (type === 3) p_consts.push({ t: 'str', v: strings[r.readvarint() - 1] || "" });
                     else if (type === 4) {
                         let id = r.readuint32();
@@ -104,9 +119,12 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
                     p_protos.push(r.readvarint());
                 }
             } else if (block === "debug") {
-                let linedefined = r.readvarint();
-                let nameid = r.readvarint();
-                p_protoname = nameid > 0 ? strings[nameid - 1] : "anonymous";
+                let linedefined = version >= 7 ? p_linedefined : r.readvarint();
+                let nameid = version >= 7 ? p_nameid : r.readvarint();
+                
+                if (version < 7 && nameid > 0) {
+                    p_protoname = strings[nameid - 1] || "anonymous";
+                }
                 
                 let hasLineInfo = r.readbyte();
                 if (hasLineInfo !== 0) {
@@ -403,37 +421,28 @@ function lift(p, allprotos, indnt, getProtoCode) {
 }
 
 function process(base64str) {
-    let buf;
     try {
-        buf = Buffer.from(base64str, 'base64');
-    } catch (e) {
-        return "";
-    }
-    
-    let r = new bufferreader(buf);
-    let ob = r.readbyte;
-    r.readbyte = function() {
-        if (this.offset >= this.length) throw new Error("EOF");
-        return ob.call(this);
-    };
-    let ou = r.readuint32;
-    r.readuint32 = function() {
-        if (this.offset + 4 > this.length) throw new Error("EOF");
-        return ou.call(this);
-    };
-    let os = r.readstring;
-    r.readstring = function(len) {
-        if (this.offset + len > this.length) throw new Error("EOF");
-        return os.call(this, len);
-    };
-    let ov = r.readvarint;
-    r.readvarint = function() {
-        return ov.call(this);
-    };
-    
-    try {
+        let buf = Buffer.from(base64str, 'base64');
+        let r = new bufferreader(buf);
+        
+        let ob = r.readbyte;
+        r.readbyte = function() {
+            if (this.offset >= this.length) throw new Error("EOF");
+            return ob.call(this);
+        };
+        let ou = r.readuint32;
+        r.readuint32 = function() {
+            if (this.offset + 4 > this.length) throw new Error("EOF");
+            return ou.call(this);
+        };
+        let os = r.readstring;
+        r.readstring = function(len) {
+            if (this.offset + len > this.length) throw new Error("EOF");
+            return os.call(this, len);
+        };
+
         let version = r.readbyte();
-        if (version < 3 || version > 7) return "";
+        if (version < 3 || version > 7) return `-- [DECOMPILER ERROR] Invalid bytecode version: ${version}`;
         
         if (version >= 4) {
             r.readbyte();
@@ -498,7 +507,7 @@ function process(base64str) {
         }
 
         if (!found) {
-            return "";
+            return "-- [DECOMPILER ERROR] Failed to determine bytecode structure or corrupted file.";
         }
         
         let getProtoCode = (pIdx, indnt) => {
@@ -524,9 +533,11 @@ function process(base64str) {
             return cp.code;
         };
         
-        return lift(allprotos[mainindex], allprotos, 0, getProtoCode);
+        let finalCode = lift(allprotos[mainindex], allprotos, 0, getProtoCode);
+        return finalCode.length > 0 ? finalCode : "-- [DECOMPILER ERROR] Output generation resulted in empty string.";
+
     } catch (e) {
-        return "";
+        return `-- [DECOMPILER FATAL ERROR]\n-- Reason: ${e.message}\n-- Please verify the passed bytecode format.`;
     }
 }
 
