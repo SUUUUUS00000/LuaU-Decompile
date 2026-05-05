@@ -1,15 +1,18 @@
 const bufferreader = require('./reader');
 const opcodes = require('./opcodes');
 
-const layouts = [["instrs", "consts", "protos", "debug"],["consts", "instrs", "protos", "debug"],["consts", "protos", "debug", "instrs"],
+const layouts = [
+    ["instrs", "consts", "protos", "debug"],["consts", "instrs", "protos", "debug"],
+    ["consts", "protos", "debug", "instrs"],
     ["instrs", "protos", "debug", "consts"]
 ];
 
 const aux_opcodes = new Set([
     "GETGLOBAL", "SETGLOBAL", "GETIMPORT", "GETTABLEKS", "SETTABLEKS", "NAMECALL",
     "JUMPIFEQ", "JUMPIFNOTEQ", "JUMPIFLE", "JUMPIFNOTLE", "JUMPIFLT", "JUMPIFNOTLT",
-    "FORGPREP", "FORGPREP_INEXT", "FORGPREP_NEXT", "SETLIST", "LOADKX", "JUMPX",
-    "JUMPXEQKNIL", "JUMPXEQKB", "JUMPXEQKN", "JUMPXEQKS"
+    "JUMPXEQKNIL", "JUMPXEQKB", "JUMPXEQKN", "JUMPXEQKS",
+    "FORGPREP", "FORGPREP_INEXT", "FORGPREP_NEXT", "SETLIST", "LOADKX",
+    "FASTCALL2", "FASTCALL2K", "FASTCALL3"
 ]);
 
 function formatKVal(k) {
@@ -52,10 +55,10 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
             }
         }
         
-        let p_instrs =[];
+        let p_instrs = [];
         let p_consts = [];
-        let p_protos = [];
-        let p_locvars =[];
+        let p_protos =[];
+        let p_locvars = [];
         let p_upvalues =[];
         let p_protoname = "anonymous";
 
@@ -76,7 +79,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
                     else if (type === 4) {
                         let id = r.readuint32();
                         let count = id >>> 30;
-                        let arr =[];
+                        let arr = [];
                         let getval = (idx) => { 
                             let c = p_consts[idx]; 
                             if (!c) return `unk_${idx}`;
@@ -151,7 +154,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout) {
     }
 }
 
-function lift(p, allprotos, indnt) {
+function lift(p, allprotos, indnt, getProtoCode) {
     if (!p || !p.instrs) return "";
     let lines =[];
     let regs = new Array(256).fill("nil");
@@ -201,14 +204,18 @@ function lift(p, allprotos, indnt) {
         let sbx = bx - 32768;
 
         let hasAux = aux_opcodes.has(opname);
-        let aux = hasAux ? p.instrs[pc + 1] : 0;
+        let aux = hasAux ? (p.instrs[pc + 1] || 0) : 0;
         let auxVal = hasAux ? p.consts[(aux >>> 0) & 0xFFFFFF] : null;
 
         try {
             if (opname === "LOADNIL") regs[a] = "nil";
             else if (opname === "LOADB") { 
                 regs[a] = b === 1 ? "true" : "false"; 
-                if (c > 0) pc += c; 
+                if (c > 0) {
+                    let target = pc + c + 1;
+                    if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                    endScopes[target].t = "else";
+                }
             }
             else if (opname === "LOADN") regs[a] = sbx;
             else if (opname === "LOADK") regs[a] = formatK(p.consts[bx]);
@@ -250,8 +257,13 @@ function lift(p, allprotos, indnt) {
                 else push(`return`);
             }
             else if (opname === "JUMP" || opname === "JUMPX") {
-                let target = pc + sbx + 1;
-                if (sbx < 0) {
+                let offset = sbx;
+                if (opname === "JUMPX") {
+                    offset = raw >>> 8;
+                    if (offset & 0x800000) offset -= 0x1000000;
+                }
+                let target = pc + offset + 1;
+                if (offset < 0) {
                     push("end");
                     indnt = Math.max(0, indnt - 1);
                 } else {
@@ -261,18 +273,18 @@ function lift(p, allprotos, indnt) {
             }
             else if (opname.startsWith("JUMPIF")) {
                 let cnd = "";
-                if (opname === "JUMPIF") cnd = `not ${regs[a] || "nil"}`;
-                else if (opname === "JUMPIFNOT") cnd = regs[a] || "nil";
-                else {
-                    let left = regs[a] || "nil";
-                    let right = regs[aux] || "nil";
-                    if (opname === "JUMPIFEQ") cnd = `${left} ~= ${right}`;
-                    else if (opname === "JUMPIFNOTEQ") cnd = `${left} == ${right}`;
-                    else if (opname === "JUMPIFLE") cnd = `${left} > ${right}`;
-                    else if (opname === "JUMPIFNOTLE") cnd = `${left} <= ${right}`;
-                    else if (opname === "JUMPIFLT") cnd = `${left} >= ${right}`;
-                    else if (opname === "JUMPIFNOTLT") cnd = `${left} < ${right}`;
-                }
+                let left = regs[a] || "nil";
+                let right = regs[aux & 0xFF] || "nil";
+                
+                if (opname === "JUMPIF") cnd = `not ${left}`;
+                else if (opname === "JUMPIFNOT") cnd = left;
+                else if (opname === "JUMPIFEQ") cnd = `${left} ~= ${right}`;
+                else if (opname === "JUMPIFNOTEQ") cnd = `${left} == ${right}`;
+                else if (opname === "JUMPIFLE") cnd = `${left} > ${right}`;
+                else if (opname === "JUMPIFNOTLE") cnd = `${left} <= ${right}`;
+                else if (opname === "JUMPIFLT") cnd = `${left} >= ${right}`;
+                else if (opname === "JUMPIFNOTLT") cnd = `${left} < ${right}`;
+                
                 push(`if ${cnd} then`);
                 let target = pc + sbx + 1;
                 if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
@@ -319,8 +331,7 @@ function lift(p, allprotos, indnt) {
             else if (opname === "SETUPVAL") push(`${p.upvalues[b] || `upval_${b}`} = ${regs[a] || "nil"}`);
             else if (opname === "NEWCLOSURE" || opname === "DUPCLOSURE") {
                 let protoIdx = opname === "NEWCLOSURE" ? bx : (p.consts[bx] ? p.consts[bx].id : 0);
-                let code = allprotos[protoIdx] ? allprotos[protoIdx].code : "function() end";
-                assignVar(a, code);
+                assignVar(a, getProtoCode(protoIdx, indnt));
             }
             else if (opname === "NEWTABLE" || opname === "DUPTABLE") {
                 assignVar(a, "{}");
@@ -336,8 +347,8 @@ function lift(p, allprotos, indnt) {
             }
             else if (opname === "GETVARARGS") regs[a] = "...";
             else if (opname === "FORNPREP") {
-                let loopVar = getVarName(a + 3);
-                push(`for ${loopVar} = ${regs[a] || "nil"}, ${regs[a+1] || "nil"}, ${regs[a+2] || "nil"} do`);
+                let loopVar = getVarName(a + 2);
+                push(`for ${loopVar} = ${regs[a+2] || "nil"}, ${regs[a] || "nil"}, ${regs[a+1] || "nil"} do`);
                 let target = pc + sbx + 1;
                 if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
                 endScopes[target].c++;
@@ -365,20 +376,14 @@ function process(base64str) {
     try {
         buf = Buffer.from(base64str, 'base64');
     } catch (e) {
-        return `-- [DECOMPILER CRASH]\n-- Reason: Failed to decode base64 buffer\n-- Message: ${e.message}`;
+        return "";
     }
     
     let r = new bufferreader(buf);
-    let trace =[];
     
-    let dumpError = (msg) => {
-        let err = `-- [DECOMPILER CRASH]\n-- Reason: ${msg}\n-- Buffer Length: ${r.length}\n-- Current Offset: ${r.offset}\n`;
-        return err;
-    };
-
     try {
         let version = r.readbyte();
-        if (version < 3 || version > 7) return dumpError(`Invalid bytecode version: ${version}`);
+        if (version < 3 || version > 7) return "";
         
         if (version >= 4) {
             r.readbyte();
@@ -443,28 +448,35 @@ function process(base64str) {
         }
 
         if (!found) {
-            return dumpError(`Missing main proto or format mismatch.`);
+            return "";
         }
         
-        for (let i = allprotos.length - 1; i >= 0; i--) {
-            let p = allprotos[i];
-            let body = lift(p, allprotos, 1);
+        let getProtoCode = (pIdx, indnt) => {
+            let cp = allprotos[pIdx];
+            if (!cp) return "function() end";
+            if (cp.code) return cp.code;
+            
+            cp.code = "function() end";
             let args =[];
-            for (let a = 0; a < p.numparams; a++) {
+            for (let a = 0; a < cp.numparams; a++) {
                 let name = `v${a + 1}`;
-                if (p.locvars) {
-                    let loc = p.locvars.find(v => v.reg === a && v.startpc <= 1);
+                if (cp.locvars) {
+                    let loc = cp.locvars.find(v => v.reg === a && v.startpc <= 1);
                     if (loc) name = loc.name;
                 }
                 args.push(name);
             }
-            if (p.isvararg) args.push("...");
-            p.code = `function(${args.join(", ")})\n${body}\nend`;
-        }
+            if (cp.isvararg) args.push("...");
+            
+            let body = lift(cp, allprotos, indnt + 1, getProtoCode);
+            let indntStr = "    ".repeat(indnt);
+            cp.code = `function(${args.join(", ")})\n${body}\n${indntStr}end`;
+            return cp.code;
+        };
         
-        return lift(allprotos[mainindex], allprotos, 0);
+        return lift(allprotos[mainindex], allprotos, 0, getProtoCode);
     } catch (e) {
-        return dumpError(`Unexpected fatal trap: ${e.message}`);
+        return "";
     }
 }
 
