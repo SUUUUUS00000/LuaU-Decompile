@@ -1,10 +1,16 @@
 const bufferreader = require('./reader');
 const opcodes = require('./opcodes');
 
-const LAYOUTS = [
-    ["instrs", "consts", "protos", "debug"],["consts", "instrs", "protos", "debug"],["consts", "protos", "debug", "instrs"],
+const layouts = [["instrs", "consts", "protos", "debug"],["consts", "instrs", "protos", "debug"],["consts", "protos", "debug", "instrs"],
     ["instrs", "protos", "debug", "consts"]
 ];
+
+const aux_opcodes = new Set([
+    "GETGLOBAL", "SETGLOBAL", "GETIMPORT", "GETTABLEKS", "SETTABLEKS", "NAMECALL",
+    "JUMPIFEQ", "JUMPIFNOTEQ", "JUMPIFLE", "JUMPIFNOTLE", "JUMPIFLT", "JUMPIFNOTLT",
+    "FORGPREP", "FORGPREP_INEXT", "FORGPREP_NEXT", "SETLIST", "LOADKX", "JUMPX",
+    "JUMPXEQKNIL", "JUMPXEQKB", "JUMPXEQKN", "JUMPXEQKS"
+]);
 
 function formatKVal(k) {
     if (!k) return "nil";
@@ -176,9 +182,15 @@ function lift(p, allprotos, indnt) {
 
     while (pc < p.instrs.length) {
         if (endScopes[pc]) {
-            indnt = Math.max(0, indnt - endScopes[pc]);
-            for(let i = 0; i < endScopes[pc]; i++) push("end");
+            indnt = Math.max(0, indnt - endScopes[pc].c);
+            if (endScopes[pc].t === "else") {
+                push("else");
+                indnt++;
+            } else {
+                for(let i = 0; i < endScopes[pc].c; i++) push("end");
+            }
         }
+
         let raw = p.instrs[pc];
         let op = raw & 0xFF;
         let opname = opcodes[op] || "UNKNOWN";
@@ -187,28 +199,32 @@ function lift(p, allprotos, indnt) {
         let c = (raw >>> 24) & 0xFF;
         let bx = (raw >>> 16) & 0xFFFF;
         let sbx = bx - 32768;
-        
+
+        let hasAux = aux_opcodes.has(opname);
+        let aux = hasAux ? p.instrs[pc + 1] : 0;
+        let auxVal = hasAux ? p.consts[(aux >>> 0) & 0xFFFFFF] : null;
+
         try {
             if (opname === "LOADNIL") regs[a] = "nil";
-            else if (opname === "LOADB") { regs[a] = b === 1 ? "true" : "false"; if (c > 0) pc++; }
+            else if (opname === "LOADB") { 
+                regs[a] = b === 1 ? "true" : "false"; 
+                if (c > 0) pc += c; 
+            }
             else if (opname === "LOADN") regs[a] = sbx;
             else if (opname === "LOADK") regs[a] = formatK(p.consts[bx]);
-            else if (opname === "LOADKX") regs[a] = formatK(p.consts[(p.instrs[++pc] >>> 0) & 0xFFFFFF]);
+            else if (opname === "LOADKX") regs[a] = formatK(auxVal);
             else if (opname === "MOVE") regs[a] = regs[b] || "nil";
-            else if (opname === "GETGLOBAL") regs[a] = formatKVal(p.consts[(p.instrs[++pc] >>> 0) & 0xFFFFFF]);
-            else if (opname === "SETGLOBAL") push(`${formatKVal(p.consts[(p.instrs[++pc] >>> 0) & 0xFFFFFF])} = ${regs[a] || "nil"}`);
-            else if (opname === "GETIMPORT") {
-                regs[a] = formatKVal(p.consts[(p.instrs[++pc] >>> 0) & 0xFFFFFF]);
-            }
+            else if (opname === "GETGLOBAL") regs[a] = formatKVal(auxVal);
+            else if (opname === "SETGLOBAL") push(`${formatKVal(auxVal)} = ${regs[a] || "nil"}`);
+            else if (opname === "GETIMPORT") regs[a] = formatKVal(auxVal);
             else if (opname === "GETTABLE") regs[a] = `${regs[b] || "nil"}[${regs[c] || "nil"}]`;
-            else if (opname === "GETTABLEKS") regs[a] = `${regs[b] || "nil"}.${formatKVal(p.consts[(p.instrs[++pc] >>> 0) & 0xFFFFFF])}`;
+            else if (opname === "GETTABLEKS") regs[a] = `${regs[b] || "nil"}.${formatKVal(auxVal)}`;
             else if (opname === "GETTABLEN") regs[a] = `${regs[b] || "nil"}[${c + 1}]`;
             else if (opname === "SETTABLE") push(`${regs[b] || "nil"}[${regs[c] || "nil"}] = ${regs[a] || "nil"}`);
-            else if (opname === "SETTABLEKS") push(`${regs[b] || "nil"}.${formatKVal(p.consts[(p.instrs[++pc] >>> 0) & 0xFFFFFF])} = ${regs[a] || "nil"}`);
+            else if (opname === "SETTABLEKS") push(`${regs[b] || "nil"}.${formatKVal(auxVal)} = ${regs[a] || "nil"}`);
             else if (opname === "SETTABLEN") push(`${regs[b] || "nil"}[${c + 1}] = ${regs[a] || "nil"}`);
             else if (opname === "NAMECALL") {
-                let func = formatKVal(p.consts[(p.instrs[++pc] >>> 0) & 0xFFFFFF]);
-                regs[a] = { m: true, obj: regs[b] || "nil", func: func };
+                regs[a] = { m: true, obj: regs[b] || "nil", func: formatKVal(auxVal) };
                 regs[a + 1] = regs[b] || "nil";
             }
             else if (opname === "CALL") {
@@ -233,48 +249,46 @@ function lift(p, allprotos, indnt) {
                 } else if (b === 0) push(`return ...`);
                 else push(`return`);
             }
-            else if (opname === "JUMP") {
-                if (endScopes[pc + 1]) {
-                    endScopes[pc + 1]--;
+            else if (opname === "JUMP" || opname === "JUMPX") {
+                let target = pc + sbx + 1;
+                if (sbx < 0) {
+                    push("end");
                     indnt = Math.max(0, indnt - 1);
-                    push("else");
-                    let target = pc + sbx + 1;
-                    endScopes[target] = (endScopes[target] || 0) + 1;
-                    indnt++;
+                } else {
+                    if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                    endScopes[target].t = "else";
                 }
             }
-            else if (opname === "JUMPIF" || opname === "JUMPIFNOT") {
-                let cnd = opname === "JUMPIF" ? regs[a] : `not ${regs[a] || "nil"}`;
-                push(`if ${cnd} then`);
-                let target = pc + sbx + 1;
-                endScopes[target] = (endScopes[target] || 0) + 1;
-                indnt++;
-            }
-            else if (opname === "JUMPIFEQ" || opname === "JUMPIFNOTEQ" || opname === "JUMPIFLE" || opname === "JUMPIFNOTLE" || opname === "JUMPIFLT" || opname === "JUMPIFNOTLT") {
-                let aux = p.instrs[++pc];
+            else if (opname.startsWith("JUMPIF")) {
                 let cnd = "";
-                let left = regs[a] || "nil";
-                let right = regs[aux] || "nil";
-                if (opname === "JUMPIFEQ") cnd = `${left} == ${right}`;
-                else if (opname === "JUMPIFNOTEQ") cnd = `${left} ~= ${right}`;
-                else if (opname === "JUMPIFLE") cnd = `${left} <= ${right}`;
-                else if (opname === "JUMPIFNOTLE") cnd = `${left} > ${right}`;
-                else if (opname === "JUMPIFLT") cnd = `${left} < ${right}`;
-                else if (opname === "JUMPIFNOTLT") cnd = `${left} >= ${right}`;
+                if (opname === "JUMPIF") cnd = `not ${regs[a] || "nil"}`;
+                else if (opname === "JUMPIFNOT") cnd = regs[a] || "nil";
+                else {
+                    let left = regs[a] || "nil";
+                    let right = regs[aux] || "nil";
+                    if (opname === "JUMPIFEQ") cnd = `${left} ~= ${right}`;
+                    else if (opname === "JUMPIFNOTEQ") cnd = `${left} == ${right}`;
+                    else if (opname === "JUMPIFLE") cnd = `${left} > ${right}`;
+                    else if (opname === "JUMPIFNOTLE") cnd = `${left} <= ${right}`;
+                    else if (opname === "JUMPIFLT") cnd = `${left} >= ${right}`;
+                    else if (opname === "JUMPIFNOTLT") cnd = `${left} < ${right}`;
+                }
                 push(`if ${cnd} then`);
                 let target = pc + sbx + 1;
-                endScopes[target] = (endScopes[target] || 0) + 1;
+                if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                endScopes[target].c++;
                 indnt++;
             }
-            else if (opname === "JUMPXEQKNIL" || opname === "JUMPXEQKB" || opname === "JUMPXEQKN" || opname === "JUMPXEQKS") {
-                let kn = formatK(p.consts[(p.instrs[++pc] >>> 0) & 0xFFFFFF]);
+            else if (opname.startsWith("JUMPXEQ")) {
+                let kn = formatK(auxVal);
                 let left = regs[a] || "nil";
-                let cnd = opname === "JUMPXEQKNIL" ? `${left} == nil` :
-                          opname === "JUMPXEQKB" ? `${left} == true` :
-                          `${left} == ${kn}`;
+                let cnd = opname === "JUMPXEQKNIL" ? `${left} ~= nil` :
+                          opname === "JUMPXEQKB" ? `${left} ~= true` :
+                          `${left} ~= ${kn}`;
                 push(`if ${cnd} then`);
                 let target = pc + sbx + 1;
-                endScopes[target] = (endScopes[target] || 0) + 1;
+                if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                endScopes[target].c++;
                 indnt++;
             }
             else if (opname === "ADD") regs[a] = `${regs[b] || "nil"} + ${regs[c] || "nil"}`;
@@ -310,10 +324,8 @@ function lift(p, allprotos, indnt) {
             }
             else if (opname === "NEWTABLE" || opname === "DUPTABLE") {
                 assignVar(a, "{}");
-                if (opname === "NEWTABLE") pc++; 
             }
             else if (opname === "SETLIST") {
-                let aux = p.instrs[++pc];
                 let count = c - 1;
                 let startIdx = aux; 
                 if (count > 0) {
@@ -327,23 +339,23 @@ function lift(p, allprotos, indnt) {
                 let loopVar = getVarName(a + 3);
                 push(`for ${loopVar} = ${regs[a] || "nil"}, ${regs[a+1] || "nil"}, ${regs[a+2] || "nil"} do`);
                 let target = pc + sbx + 1;
-                endScopes[target] = (endScopes[target] || 0) + 1;
+                if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                endScopes[target].c++;
                 indnt++;
             }
-            else if (opname === "FORGPREP" || opname === "FORGPREP_INEXT" || opname === "FORGPREP_NEXT") {
+            else if (opname.startsWith("FORGPREP")) {
                 let var1 = getVarName(a + 3);
                 let var2 = getVarName(a + 4);
-                push(`for ${var1}, ${var2} in ${regs[a] || "nil"} do`);
+                push(`for ${var1}, ${var2} in pairs(${regs[a] || "nil"}) do`);
                 let target = pc + sbx + 1;
-                endScopes[target] = (endScopes[target] || 0) + 1;
+                if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
+                endScopes[target].c++;
                 indnt++;
             }
-            else if (opname === "JUMPBACK") {
-                push("end");
-                indnt = Math.max(0, indnt - 1);
-            }
         } catch (e) {}
+
         pc++;
+        if (hasAux) pc++;
     }
     return lines.join("\n");
 }
@@ -360,53 +372,24 @@ function process(base64str) {
     let trace =[];
     
     let dumpError = (msg) => {
-        let err = `-- [DECOMPILER CRASH]\n-- Reason: ${msg}\n-- Buffer Length: ${r.length}\n-- Current Offset: ${r.offset}\n-- Execution Trace:\n`;
-        for (let i = Math.max(0, trace.length - 30); i < trace.length; i++) {
-            err += `-- > ${trace[i]}\n`;
-        }
-        let start = Math.max(0, r.offset - 64);
-        let end = Math.min(r.length, r.offset + 128);
-        err += `-- Hex Dump (${start} to ${end}):\n`;
-        let hexLines =[];
-        let currentLine = "";
-        for (let i = start; i < end; i++) {
-            let byteStr = buf[i].toString(16).padStart(2, '0');
-            if (i === r.offset) {
-                currentLine += `>>${byteStr}<< `;
-            } else {
-                currentLine += `${byteStr} `;
-            }
-            if ((i - start + 1) % 16 === 0) {
-                hexLines.push("-- " + currentLine);
-                currentLine = "";
-            }
-        }
-        if (currentLine.length > 0) hexLines.push("-- " + currentLine);
-        err += hexLines.join('\n');
+        let err = `-- [DECOMPILER CRASH]\n-- Reason: ${msg}\n-- Buffer Length: ${r.length}\n-- Current Offset: ${r.offset}\n`;
         return err;
     };
 
     try {
-        trace.push("Start reading bytecode");
         let version = r.readbyte();
-        trace.push(`Version: ${version}`);
-        
         if (version < 3 || version > 7) return dumpError(`Invalid bytecode version: ${version}`);
         
         if (version >= 4) {
-            let t_ver = r.readbyte();
-            trace.push(`TypesVersion: ${t_ver}`);
+            r.readbyte();
         }
         
         let stringcount = r.readvarint();
-        trace.push(`String count: ${stringcount}`);
-        
         let strings =[];
         for (let i = 0; i < stringcount; i++) {
             let slen = r.readvarint();
             strings.push(r.readstring(slen));
         }
-        trace.push("Strings parsed successfully");
         
         let originalStringsLength = strings.length;
         let savedStringsOffset = r.offset;
@@ -415,10 +398,8 @@ function process(base64str) {
         let allprotos =[];
         let mainindex = 0;
 
-        trace.push("Backtrack Failures:");
-
-        for (let lIdx = 0; lIdx < LAYOUTS.length; lIdx++) {
-            let layout = LAYOUTS[lIdx];
+        for (let lIdx = 0; lIdx < layouts.length; lIdx++) {
+            let layout = layouts[lIdx];
             for (let extraStrings = 0; extraStrings <= 15; extraStrings++) {
                 r.offset = savedStringsOffset;
                 strings.length = originalStringsLength;
@@ -441,7 +422,6 @@ function process(base64str) {
                     for (let i = 0; i < protocount; i++) {
                         let p = parseproto(r, strings, version, i,[], layout);
                         if (!p.success) {
-                            trace.push(`-- > L:${lIdx} ES:${extraStrings} P:${i} FAILED: ${p.error}`);
                             pSuccess = false;
                             break;
                         }
@@ -455,29 +435,15 @@ function process(base64str) {
                             mainindex = mIdx;
                             found = true;
                             break;
-                        } else {
-                            trace.push(`-- > L:${lIdx} ES:${extraStrings} FAILED: mIdx ${mIdx} out of bounds (protocount ${protocount})`);
                         }
                     }
-                } catch (e) {
-                    trace.push(`-- > L:${lIdx} ES:${extraStrings} FAILED FATAL: ${e.message}`);
-                }
+                } catch (e) {}
             }
             if (found) break;
         }
 
         if (!found) {
-            r.offset = savedStringsOffset;
-            strings.length = originalStringsLength;
-            let protocount = r.readvarint();
-            for (let i = 0; i < protocount; i++) {
-                let p = parseproto(r, strings, version, i, trace, ["instrs", "consts", "protos", "debug"]);
-                if (!p.success) {
-                    return dumpError(`Proto [${i}] crash during: ${p.state}. Error: ${p.error}`);
-                }
-            }
-            let mIdx = r.readvarint();
-            return dumpError(`Missing main proto. mainindex=${mIdx} but protocount=${protocount}`);
+            return dumpError(`Missing main proto or format mismatch.`);
         }
         
         for (let i = allprotos.length - 1; i >= 0; i--) {
