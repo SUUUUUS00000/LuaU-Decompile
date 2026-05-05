@@ -169,13 +169,13 @@ function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, u
 
 function lift(p, allprotos, indnt, getProtoCode) {
     if (!p || !p.instrs || p.instrs.length === 0) return "";
-    let lines =[];
-    let regs = new Array(256).fill("nil");
+    let lines = [];
+    let regs = new Array(256).fill(null);
     let definedVars = new Set();
     let pc = 0;
     let endScopes = {};
     let loopStarts = new Set();
-    
+
     let getVarName = (reg) => {
         if (p.locvars) {
             let loc = p.locvars.find(v => v.reg === reg && v.startpc <= pc && v.endpc >= pc);
@@ -184,7 +184,17 @@ function lift(p, allprotos, indnt, getProtoCode) {
         return `v${reg}`;
     };
 
+    for (let i = 0; i < p.numparams; i++) {
+        let name = getVarName(i);
+        regs[i] = name;
+        definedVars.add(name);
+    }
+
     let push = (str) => { lines.push("    ".repeat(indnt) + str); };
+
+    let getR = (r) => {
+        return regs[r] !== null ? regs[r] : getVarName(r);
+    };
 
     let assignVar = (reg, val) => {
         let varName = getVarName(reg);
@@ -221,7 +231,8 @@ function lift(p, allprotos, indnt, getProtoCode) {
         let b = (raw >>> 16) & 0xFF;
         let c = (raw >>> 24) & 0xFF;
         let bx = (raw >>> 16) & 0xFFFF;
-        let sbx = raw >> 16;
+        let sbx = bx;
+        if (sbx >= 32768) sbx -= 65536;
 
         let hasAux = aux_opcodes.has(opname);
         let aux = hasAux ? (p.instrs[pc + 1] || 0) : 0;
@@ -250,44 +261,42 @@ function lift(p, allprotos, indnt, getProtoCode) {
             else if (opname === "LOADN") regs[a] = sbx;
             else if (opname === "LOADK") regs[a] = formatK(p.consts[bx]);
             else if (opname === "LOADKX") regs[a] = formatK(auxVal);
-            else if (opname === "MOVE") regs[a] = regs[b] || "nil";
+            else if (opname === "MOVE") regs[a] = getR(b);
             else if (opname === "GETGLOBAL") regs[a] = formatKVal(auxVal);
-            else if (opname === "SETGLOBAL") push(`${formatKVal(auxVal)} = ${regs[a] || "nil"}`);
+            else if (opname === "SETGLOBAL") push(`${formatKVal(auxVal)} = ${getR(a)}`);
             else if (opname === "GETIMPORT") regs[a] = formatKVal(auxVal);
-            else if (opname === "GETTABLE") regs[a] = `${regs[b] || "nil"}[${regs[c] || "nil"}]`;
-            else if (opname === "GETTABLEKS") regs[a] = `${regs[b] || "nil"}.${formatKVal(auxVal)}`;
-            else if (opname === "GETTABLEN") regs[a] = `${regs[b] || "nil"}[${c + 1}]`;
-            else if (opname === "SETTABLE") push(`${regs[b] || "nil"}[${regs[c] || "nil"}] = ${regs[a] || "nil"}`);
-            else if (opname === "SETTABLEKS") push(`${regs[b] || "nil"}.${formatKVal(auxVal)} = ${regs[a] || "nil"}`);
-            else if (opname === "SETTABLEN") push(`${regs[b] || "nil"}[${c + 1}] = ${regs[a] || "nil"}`);
+            else if (opname === "GETTABLE") regs[a] = `${getR(b)}[${getR(c)}]`;
+            else if (opname === "GETTABLEKS") regs[a] = `${getR(b)}.${formatKVal(auxVal)}`;
+            else if (opname === "GETTABLEN") regs[a] = `${getR(b)}[${c + 1}]`;
+            else if (opname === "SETTABLE") push(`${getR(b)}[${getR(c)}] = ${getR(a)}`);
+            else if (opname === "SETTABLEKS") push(`${getR(b)}.${formatKVal(auxVal)} = ${getR(a)}`);
+            else if (opname === "SETTABLEN") push(`${getR(b)}[${c + 1}] = ${getR(a)}`);
             else if (opname === "NAMECALL") {
-                regs[a] = { m: true, obj: regs[b] || "nil", func: formatKVal(auxVal) };
-                regs[a + 1] = regs[b] || "nil";
+                regs[a] = { m: true, obj: getR(b), func: formatKVal(auxVal) };
+                regs[a + 1] = getR(b);
             }
             else if (opname === "CALL") {
                 let f = regs[a];
-                let args =[];
+                let args = [];
                 let callStr = "";
                 if (b === 0) {
                     args.push("...");
                 } else {
                     let argcount = b - 1;
                     if (f && f.m) {
-                        for (let i = 2; i <= argcount; i++) args.push(regs[a + i] || "nil");
+                        for (let i = 2; i <= argcount; i++) args.push(getR(a + i));
                     } else {
-                        for (let i = 1; i <= argcount; i++) args.push(regs[a + i] || "nil");
+                        for (let i = 1; i <= argcount; i++) args.push(getR(a + i));
                     }
                 }
-                
                 if (f && f.m) callStr = `${f.obj}:${f.func}(${args.join(", ")})`;
-                else callStr = `${typeof f === 'string' ? f : "func"}(${args.join(", ")})`;
-                
+                else callStr = `${typeof f === 'string' ? f : getVarName(a)}(${args.join(", ")})`;
                 if (c - 1 === 0) push(callStr); else assignVar(a, callStr);
             }
             else if (opname === "RETURN") {
                 if (b > 1) {
-                    let r =[];
-                    for (let i = 0; i < b - 1; i++) r.push(regs[a + i] || "nil");
+                    let r = [];
+                    for (let i = 0; i < b - 1; i++) r.push(getR(a + i));
                     push(`return ${r.join(", ")}`);
                 } else if (b === 0) push(`return ...`);
                 else push(`return`);
@@ -322,21 +331,34 @@ function lift(p, allprotos, indnt, getProtoCode) {
                 if (!endScopes[pc + 1]) endScopes[pc + 1] = { c: 0, t: "end" };
                 endScopes[pc + 1].c++;
             }
-            else if (opname.startsWith("JUMPIF")) {
+            else if (opname.startsWith("JUMPIF") || opname.startsWith("JUMPXEQ")) {
                 let fwd = sbx >= 0;
                 let cnd = "";
-                let left = regs[a] || "nil";
-                let right = regs[aux & 0xFF] || "nil";
+                let left = getR(a);
                 
-                if (opname === "JUMPIF") cnd = fwd ? `not ${left}` : left;
-                else if (opname === "JUMPIFNOT") cnd = fwd ? left : `not ${left}`;
-                else if (opname === "JUMPIFEQ") cnd = fwd ? `${left} ~= ${right}` : `${left} == ${right}`;
-                else if (opname === "JUMPIFNOTEQ") cnd = fwd ? `${left} == ${right}` : `${left} ~= ${right}`;
-                else if (opname === "JUMPIFLE") cnd = fwd ? `${left} > ${right}` : `${left} <= ${right}`;
-                else if (opname === "JUMPIFNOTLE") cnd = fwd ? `${left} <= ${right}` : `${left} > ${right}`;
-                else if (opname === "JUMPIFLT") cnd = fwd ? `${left} >= ${right}` : `${left} < ${right}`;
-                else if (opname === "JUMPIFNOTLT") cnd = fwd ? `${left} < ${right}` : `${left} >= ${right}`;
-                
+                if (opname.startsWith("JUMPXEQ")) {
+                    let offset = aux | 0;
+                    fwd = offset >= 0;
+                    let kn = p.consts[bx] ? formatK(p.consts[bx]) : "unk";
+                    if (opname === "JUMPXEQKNIL") cnd = fwd ? `${left} ~= nil` : `${left} == nil`;
+                    else if (opname === "JUMPXEQKB") {
+                        let kb = ((raw >>> 16) & 0xFF) === 1 ? "true" : "false";
+                        cnd = fwd ? `${left} ~= ${kb}` : `${left} == ${kb}`;
+                    }
+                    else cnd = fwd ? `${left} ~= ${kn}` : `${left} == ${kn}`;
+                    sbx = offset;
+                } else {
+                    let right = getR(aux & 0xFF);
+                    if (opname === "JUMPIF") cnd = fwd ? `not ${left}` : left;
+                    else if (opname === "JUMPIFNOT") cnd = fwd ? left : `not ${left}`;
+                    else if (opname === "JUMPIFEQ") cnd = fwd ? `${left} ~= ${right}` : `${left} == ${right}`;
+                    else if (opname === "JUMPIFNOTEQ") cnd = fwd ? `${left} == ${right}` : `${left} ~= ${right}`;
+                    else if (opname === "JUMPIFLE") cnd = fwd ? `${left} > ${right}` : `${left} <= ${right}`;
+                    else if (opname === "JUMPIFNOTLE") cnd = fwd ? `${left} <= ${right}` : `${left} > ${right}`;
+                    else if (opname === "JUMPIFLT") cnd = fwd ? `${left} >= ${right}` : `${left} < ${right}`;
+                    else if (opname === "JUMPIFNOTLT") cnd = fwd ? `${left} < ${right}` : `${left} >= ${right}`;
+                }
+
                 let target = pc + sbx + 1;
                 if (!fwd) {
                     push(`if ${cnd} then break end`);
@@ -347,60 +369,36 @@ function lift(p, allprotos, indnt, getProtoCode) {
                     indnt++;
                 }
             }
-            else if (opname.startsWith("JUMPXEQ")) {
-                let offset = aux | 0;
-                let fwd = offset >= 0;
-                let kn = p.consts[bx] ? formatK(p.consts[bx]) : "unk";
-                let left = regs[a] || "nil";
-                let cnd = "";
-                
-                if (opname === "JUMPXEQKNIL") cnd = fwd ? `${left} ~= nil` : `${left} == nil`;
-                else if (opname === "JUMPXEQKB") {
-                    let kb = ((raw >>> 16) & 0xFF) === 1 ? "true" : "false";
-                    cnd = fwd ? `${left} ~= ${kb}` : `${left} == ${kb}`;
-                }
-                else cnd = fwd ? `${left} ~= ${kn}` : `${left} == ${kn}`;
-                          
-                let target = pc + offset + 1;
-                if (!fwd) {
-                    push(`if ${cnd} then break end`);
-                } else {
-                    push(`if ${cnd} then`);
-                    if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
-                    endScopes[target].c++;
-                    indnt++;
-                }
-            }
-            else if (opname === "ADD") regs[a] = `${regs[b] || "nil"} + ${regs[c] || "nil"}`;
-            else if (opname === "SUB") regs[a] = `${regs[b] || "nil"} - ${regs[c] || "nil"}`;
-            else if (opname === "MUL") regs[a] = `${regs[b] || "nil"} * ${regs[c] || "nil"}`;
-            else if (opname === "DIV") regs[a] = `${regs[b] || "nil"} / ${regs[c] || "nil"}`;
-            else if (opname === "MOD") regs[a] = `${regs[b] || "nil"} % ${regs[c] || "nil"}`;
-            else if (opname === "POW") regs[a] = `${regs[b] || "nil"} ^ ${regs[c] || "nil"}`;
-            else if (opname === "ADDK") regs[a] = `${regs[b] || "nil"} + ${formatK(p.consts[c])}`;
-            else if (opname === "SUBK") regs[a] = `${regs[b] || "nil"} - ${formatK(p.consts[c])}`;
-            else if (opname === "MULK") regs[a] = `${regs[b] || "nil"} * ${formatK(p.consts[c])}`;
-            else if (opname === "DIVK") regs[a] = `${regs[b] || "nil"} / ${formatK(p.consts[c])}`;
-            else if (opname === "MODK") regs[a] = `${regs[b] || "nil"} % ${formatK(p.consts[c])}`;
-            else if (opname === "POWK") regs[a] = `${regs[b] || "nil"} ^ ${formatK(p.consts[c])}`;
-            else if (opname === "SUBRK") regs[a] = `${formatK(p.consts[b])} - ${regs[c] || "nil"}`;
-            else if (opname === "DIVRK") regs[a] = `${formatK(p.consts[b])} / ${regs[c] || "nil"}`;
-            else if (opname === "IDIV") regs[a] = `math.floor(${regs[b] || "nil"} / ${regs[c] || "nil"})`;
-            else if (opname === "IDIVK") regs[a] = `math.floor(${regs[b] || "nil"} / ${formatK(p.consts[c])})`;
-            else if (opname === "AND") regs[a] = `${regs[b] || "nil"} and ${regs[c] || "nil"}`;
-            else if (opname === "OR") regs[a] = `${regs[b] || "nil"} or ${regs[c] || "nil"}`;
-            else if (opname === "ANDK") regs[a] = `${regs[b] || "nil"} and ${formatK(p.consts[c])}`;
-            else if (opname === "ORK") regs[a] = `${regs[b] || "nil"} or ${formatK(p.consts[c])}`;
-            else if (opname === "NOT") regs[a] = `not ${regs[b] || "nil"}`;
-            else if (opname === "MINUS") regs[a] = `-${regs[b] || "nil"}`;
-            else if (opname === "LENGTH") regs[a] = `#${regs[b] || "nil"}`;
+            else if (opname === "ADD") regs[a] = `${getR(b)} + ${getR(c)}`;
+            else if (opname === "SUB") regs[a] = `${getR(b)} - ${getR(c)}`;
+            else if (opname === "MUL") regs[a] = `${getR(b)} * ${getR(c)}`;
+            else if (opname === "DIV") regs[a] = `${getR(b)} / ${getR(c)}`;
+            else if (opname === "MOD") regs[a] = `${getR(b)} % ${getR(c)}`;
+            else if (opname === "POW") regs[a] = `${getR(b)} ^ ${getR(c)}`;
+            else if (opname === "ADDK") regs[a] = `${getR(b)} + ${formatK(p.consts[c])}`;
+            else if (opname === "SUBK") regs[a] = `${getR(b)} - ${formatK(p.consts[c])}`;
+            else if (opname === "MULK") regs[a] = `${getR(b)} * ${formatK(p.consts[c])}`;
+            else if (opname === "DIVK") regs[a] = `${getR(b)} / ${formatK(p.consts[c])}`;
+            else if (opname === "MODK") regs[a] = `${getR(b)} % ${formatK(p.consts[c])}`;
+            else if (opname === "POWK") regs[a] = `${getR(b)} ^ ${formatK(p.consts[c])}`;
+            else if (opname === "SUBRK") regs[a] = `${formatK(p.consts[b])} - ${getR(c)}`;
+            else if (opname === "DIVRK") regs[a] = `${formatK(p.consts[b])} / ${getR(c)}`;
+            else if (opname === "IDIV") regs[a] = `math.floor(${getR(b)} / ${getR(c)})`;
+            else if (opname === "IDIVK") regs[a] = `math.floor(${getR(b)} / ${formatK(p.consts[c])})`;
+            else if (opname === "AND") regs[a] = `${getR(b)} and ${getR(c)}`;
+            else if (opname === "OR") regs[a] = `${getR(b)} or ${getR(c)}`;
+            else if (opname === "ANDK") regs[a] = `${getR(b)} and ${formatK(p.consts[c])}`;
+            else if (opname === "ORK") regs[a] = `${getR(b)} or ${formatK(p.consts[c])}`;
+            else if (opname === "NOT") regs[a] = `not ${getR(b)}`;
+            else if (opname === "MINUS") regs[a] = `-${getR(b)}`;
+            else if (opname === "LENGTH") regs[a] = `#${getR(b)}`;
             else if (opname === "CONCAT") {
-                let r =[];
-                for (let i = b; i <= c; i++) r.push(regs[i] || '""');
+                let r = [];
+                for (let i = b; i <= c; i++) r.push(getR(i));
                 regs[a] = r.join(" .. ");
             }
             else if (opname === "GETUPVAL") regs[a] = p.upvalues[b] || `upval_${b}`;
-            else if (opname === "SETUPVAL") push(`${p.upvalues[b] || `upval_${b}`} = ${regs[a] || "nil"}`);
+            else if (opname === "SETUPVAL") push(`${p.upvalues[b] || `upval_${b}`} = ${getR(a)}`);
             else if (opname === "NEWCLOSURE" || opname === "DUPCLOSURE") {
                 let protoIdx = opname === "NEWCLOSURE" ? bx : (p.consts[bx] ? p.consts[bx].id : 0);
                 assignVar(a, getProtoCode(protoIdx, indnt));
@@ -413,14 +411,14 @@ function lift(p, allprotos, indnt, getProtoCode) {
                 let startIdx = aux; 
                 if (count > 0) {
                     for (let i = 0; i < count; i++) {
-                        push(`${regs[a]}[${startIdx + i}] = ${regs[b + i] || "nil"}`);
+                        push(`${getR(a)}[${startIdx + i}] = ${getR(b + i)}`);
                     }
                 }
             }
             else if (opname === "GETVARARGS") regs[a] = "...";
             else if (opname === "FORNPREP") {
                 let loopVar = getVarName(a + 2);
-                push(`for ${loopVar} = ${regs[a]} or 0, ${regs[a+1]} or 0, ${regs[a+2]} or 1 do`);
+                push(`for ${loopVar} = ${getR(a)} or 0, ${getR(a+1)} or 0, ${getR(a+2)} or 1 do`);
                 let target = pc + sbx + 1;
                 if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
                 endScopes[target].c++;
@@ -431,21 +429,18 @@ function lift(p, allprotos, indnt, getProtoCode) {
             else if (opname.startsWith("FORGPREP")) {
                 let var1 = getVarName(a + 3);
                 let var2 = getVarName(a + 4);
-                push(`for ${var1}, ${var2} in pairs(${regs[a] || "nil"}) do`);
+                push(`for ${var1}, ${var2} in pairs(${getR(a)}) do`);
                 let target = pc + sbx + 1;
                 if (!endScopes[target]) endScopes[target] = { c: 0, t: "end" };
                 endScopes[target].c++;
                 indnt++;
             }
-            else if (opname.startsWith("FASTCALL")) {
+            else if (opname === "BREAK") {
+                push("break");
             }
-            else {
-                if (!opname.includes("UNKNOWN")) {
-                    regs[a] = `"${opname}"`;
-                }
+            else if (opname === "CLOSEUPVALS") {
             }
-        } catch (e) {
-        }
+        } catch (e) {}
 
         pc++;
         if (hasAux) pc++;
