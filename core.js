@@ -167,7 +167,6 @@ function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, u
     }
 }
 
-// ОПТИМИЗАТОР AST: Схлопывает логику и анализирует паттерны
 function optimizeAST(node) {
     if (!node) return node;
     
@@ -179,8 +178,6 @@ function optimizeAST(node) {
     } else if (node.type === "If") {
         node.body = optimizeAST(node.body);
         if (node.elseBody) node.elseBody = optimizeAST(node.elseBody);
-        
-        // СЛИЯНИЕ АНДОВ (Condition Merging - And)
         if (!node.elseBody && node.body && node.body.body && node.body.body.length === 1) {
             let inner = node.body.body[0];
             if (inner.type === "If" && !inner.elseBody) {
@@ -190,7 +187,6 @@ function optimizeAST(node) {
             }
         }
 
-        // ТРАНСФОРМАЦИЯ В ЛОГИЧЕСКОЕ ПРИСВАИВАНИЕ (A and B or C)
         if (node.elseBody && node.body && node.body.body.length === 1 && node.elseBody.body.length === 1) {
             let tStmt = node.body.body[0];
             let eStmt = node.elseBody.body[0];
@@ -211,7 +207,6 @@ function optimizeAST(node) {
         }
     } else if (node.type === "While") {
         node.body = optimizeAST(node.body);
-        // REPEAT-UNTIL Детектор
         if (node.cond && node.cond.value === "true" && node.body && node.body.body) {
             let stmts = node.body.body;
             if (stmts.length > 0) {
@@ -258,7 +253,6 @@ function stringifyAST(node, ind) {
             let out = `${p}if ${stringifyAST(node.cond, 0)} then\n${stringifyAST(node.body, ind+1)}`;
             let currElse = node.elseBody;
             
-            // ELSEIF РАЗВЕРТЫВАНИЕ
             while (currElse && currElse.body && currElse.body.length === 1 && currElse.body[0].type === "If") {
                 let nextIf = currElse.body[0];
                 out += `\n${p}elseif ${stringifyAST(nextIf.cond, 0)} then\n${stringifyAST(nextIf.body, ind+1)}`;
@@ -378,7 +372,6 @@ function lift(p, allprotos, getProtoCode) {
             let srcOp = p.instrs[sourcePc] & 0xFF;
             let srcOpName = opcodes[srcOp];
             
-            // Если прыжок инициирован НЕ циклом FOR, создаем while
             if (!srcOpName || !srcOpName.startsWith("FOR")) {
                 let loopBody = [];
                 let whileNode = { type: "While", cond: { type: "Literal", value: "true" }, body: { type: "Block", body: loopBody } };
@@ -395,7 +388,6 @@ function lift(p, allprotos, getProtoCode) {
         let c = (raw >>> 24) & 0xFF;
         let bx = (raw >>> 16) & 0xFFFF;
         let sbx = bx >= 32768 ? bx - 65536 : bx;
-
         let hasAux = aux_opcodes.has(opname);
         let aux = hasAux ? (p.instrs[pc + 1] || 0) : 0;
         let auxVal = hasAux ? p.consts[(aux >>> 0) & 0xFFFFFF] : null;
@@ -486,8 +478,6 @@ function lift(p, allprotos, getProtoCode) {
                 
                 let currentScope = scopeStack[scopeStack.length - 1];
                 if (currentScope.owner && currentScope.owner.type === "If" && pc === currentScope.endPc - 1) {
-                    // Это прыжок обхода else блока, он уже учтен. Ничего не делаем.
-                } else if (isBreak) {
                     pushNode({ type: "Break" });
                 }
             }
@@ -525,7 +515,6 @@ function lift(p, allprotos, getProtoCode) {
                 let isElse = false;
                 let elseTarget = -1;
                 
-                // Распознавание IF-ELSE (Прыжок перед концом if)
                 if (target - 1 >= 0 && target - 1 < p.instrs.length) {
                     let beforeTargetOp = p.instrs[target - 1] & 0xFF;
                     let beforeTargetOpName = opcodes[beforeTargetOp];
