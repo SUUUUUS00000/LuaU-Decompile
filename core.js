@@ -14,10 +14,8 @@ permute(["instrs", "consts", "protos", "debug"]);
 
 const aux_opcodes = new Set([
     "GETGLOBAL", "SETGLOBAL", "GETIMPORT", "GETTABLEKS", "SETTABLEKS", "NAMECALL",
-    "JUMPIFEQ", "JUMPIFNOTEQ", "JUMPIFLE", "JUMPIFNOTLE", "JUMPIFLT", "JUMPIFNOTLT",
     "JUMPXEQKNIL", "JUMPXEQKB", "JUMPXEQKN", "JUMPXEQKS",
-    "FORGLOOP", "LOADKX", "SETLIST", "NEWTABLE", "DUPTABLE",
-    "FASTCALL1", "FASTCALL2", "FASTCALL2K", "FASTCALL3"
+    "FORGLOOP", "LOADKX", "SETLIST", "NEWTABLE", "DUPTABLE", "JUMPX"
 ]);
 
 function formatKVal(k) {
@@ -178,6 +176,7 @@ function optimizeAST(node) {
     } else if (node.type === "If") {
         node.body = optimizeAST(node.body);
         if (node.elseBody) node.elseBody = optimizeAST(node.elseBody);
+        
         if (!node.elseBody && node.body && node.body.body && node.body.body.length === 1) {
             let inner = node.body.body[0];
             if (inner.type === "If" && !inner.elseBody) {
@@ -252,7 +251,6 @@ function stringifyAST(node, ind) {
         case "If": 
             let out = `${p}if ${stringifyAST(node.cond, 0)} then\n${stringifyAST(node.body, ind+1)}`;
             let currElse = node.elseBody;
-            
             while (currElse && currElse.body && currElse.body.length === 1 && currElse.body[0].type === "If") {
                 let nextIf = currElse.body[0];
                 out += `\n${p}elseif ${stringifyAST(nextIf.cond, 0)} then\n${stringifyAST(nextIf.body, ind+1)}`;
@@ -300,12 +298,16 @@ function lift(p, allprotos, getProtoCode) {
         let opname = opcodes[op] || "UNKNOWN";
         let bx = (raw >>> 16) & 0xFFFF;
         let sbx = bx >= 32768 ? bx - 65536 : bx;
+        
+        let hasAux = aux_opcodes.has(opname);
+        let aux = hasAux ? (p.instrs[pc + 1] || 0) : 0;
+
         if (opname === "JUMPBACK") loopHeaders[pc - bx + 1] = pc;
         else if (opname === "JUMPX" || opname === "JUMP") {
-            let offset = opname === "JUMPX" ? (raw >> 8) : sbx;
+            let offset = opname === "JUMPX" ? aux : sbx;
             if (offset < 0) loopHeaders[pc + offset + 1] = pc;
         }
-        if (aux_opcodes.has(opname)) pc++;
+        if (hasAux) pc++;
     }
 
     let definedVars = new Set();
@@ -388,11 +390,12 @@ function lift(p, allprotos, getProtoCode) {
         let c = (raw >>> 24) & 0xFF;
         let bx = (raw >>> 16) & 0xFFFF;
         let sbx = bx >= 32768 ? bx - 65536 : bx;
+
         let hasAux = aux_opcodes.has(opname);
         let aux = hasAux ? (p.instrs[pc + 1] || 0) : 0;
         let auxVal = hasAux ? p.consts[(aux >>> 0) & 0xFFFFFF] : null;
 
-        if (opname === "NOP" || opname === "COVERAGE" || opname === "CAPTURE" || opname === "PREPVARARGS") {
+        if (opname === "NOP" || opname === "COVERAGE" || opname === "CAPTURE" || opname === "PREPVARARGS" || opname.startsWith("FASTCALL")) {
             pc += hasAux ? 2 : 1;
             continue;
         }
@@ -423,6 +426,7 @@ function lift(p, allprotos, getProtoCode) {
         }
         else if (opname === "NAMECALL") {
             namecalls[a] = { obj: getR(b), func: formatKVal(auxVal) };
+            regs[a + 1] = getR(b);
         }
         else if (opname === "CALL") {
             let nc = namecalls[a];
@@ -461,7 +465,7 @@ function lift(p, allprotos, getProtoCode) {
             pushNode({ type: "Return", args: rArgs });
         }
         else if (opname === "JUMP" || opname === "JUMPX") {
-            let offset = opname === "JUMPX" ? (raw >> 8) : sbx;
+            let offset = opname === "JUMPX" ? aux : sbx;
             let target = pc + offset + 1;
             
             if (offset >= 0) {
@@ -478,6 +482,7 @@ function lift(p, allprotos, getProtoCode) {
                 
                 let currentScope = scopeStack[scopeStack.length - 1];
                 if (currentScope.owner && currentScope.owner.type === "If" && pc === currentScope.endPc - 1) {
+                } else if (isBreak) {
                     pushNode({ type: "Break" });
                 }
             }
@@ -486,9 +491,10 @@ function lift(p, allprotos, getProtoCode) {
             let fwd = sbx >= 0;
             let cnd;
             let left = getR(a);
+            let offset = sbx;
             
             if (opname.startsWith("JUMPXEQ")) {
-                let offset = aux | 0;
+                offset = aux | 0;
                 fwd = offset >= 0;
                 let kn = p.consts[bx] ? formatK(p.consts[bx]) : { type: "Literal", value: "unk" };
                 if (opname === "JUMPXEQKNIL") cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: { type: "Literal", value: "nil" } };
@@ -497,7 +503,6 @@ function lift(p, allprotos, getProtoCode) {
                     cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: { type: "Literal", value: kb } };
                 }
                 else cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: kn };
-                sbx = offset;
             } else {
                 let right = getR(aux & 0xFF);
                 if (opname === "JUMPIF") cnd = fwd ? { type: "UnaryExpression", op: "not", arg: left } : left;
@@ -510,7 +515,7 @@ function lift(p, allprotos, getProtoCode) {
                 else if (opname === "JUMPIFNOTLT") cnd = { type: "BinaryExpression", op: fwd ? "<" : ">=", left: left, right: right };
             }
 
-            let target = pc + sbx + 1;
+            let target = pc + offset + 1;
             if (fwd) {
                 let isElse = false;
                 let elseTarget = -1;
@@ -523,7 +528,7 @@ function lift(p, allprotos, getProtoCode) {
                         let jmpRaw = p.instrs[target - 1];
                         let jmpSbx = (jmpRaw >>> 16) & 0xFFFF;
                         if (jmpSbx >= 32768) jmpSbx -= 65536;
-                        let jmpOffset = beforeTargetOpName === "JUMPX" ? (jmpRaw >> 8) : jmpSbx;
+                        let jmpOffset = beforeTargetOpName === "JUMPX" ? (p.instrs[target] || 0) : jmpSbx;
                         elseTarget = (target - 1) + jmpOffset + 1;
                     }
                 }
