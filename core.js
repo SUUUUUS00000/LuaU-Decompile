@@ -167,6 +167,73 @@ function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, u
     }
 }
 
+// ОПТИМИЗАТОР AST: Схлопывает логику и анализирует паттерны
+function optimizeAST(node) {
+    if (!node) return node;
+    
+    if (node.type === "Block") {
+        for (let i = 0; i < node.body.length; i++) {
+            node.body[i] = optimizeAST(node.body[i]);
+        }
+        node.body = node.body.filter(n => n !== null);
+    } else if (node.type === "If") {
+        node.body = optimizeAST(node.body);
+        if (node.elseBody) node.elseBody = optimizeAST(node.elseBody);
+        
+        // СЛИЯНИЕ АНДОВ (Condition Merging - And)
+        if (!node.elseBody && node.body && node.body.body && node.body.body.length === 1) {
+            let inner = node.body.body[0];
+            if (inner.type === "If" && !inner.elseBody) {
+                node.cond = { type: "BinaryExpression", op: "and", left: node.cond, right: inner.cond };
+                node.body = inner.body;
+                return optimizeAST(node); 
+            }
+        }
+
+        // ТРАНСФОРМАЦИЯ В ЛОГИЧЕСКОЕ ПРИСВАИВАНИЕ (A and B or C)
+        if (node.elseBody && node.body && node.body.body.length === 1 && node.elseBody.body.length === 1) {
+            let tStmt = node.body.body[0];
+            let eStmt = node.elseBody.body[0];
+            if ((tStmt.type === "Assignment" && eStmt.type === "Assignment") || 
+                (tStmt.type === "LocalAssignment" && eStmt.type === "LocalAssignment")) {
+                if (stringifyAST(tStmt.left, 0) === stringifyAST(eStmt.left, 0)) {
+                    return {
+                        type: tStmt.type,
+                        left: tStmt.left,
+                        right: {
+                            type: "BinaryExpression", op: "or",
+                            left: { type: "BinaryExpression", op: "and", left: node.cond, right: tStmt.right },
+                            right: eStmt.right
+                        }
+                    };
+                }
+            }
+        }
+    } else if (node.type === "While") {
+        node.body = optimizeAST(node.body);
+        // REPEAT-UNTIL Детектор
+        if (node.cond && node.cond.value === "true" && node.body && node.body.body) {
+            let stmts = node.body.body;
+            if (stmts.length > 0) {
+                let lastStmt = stmts[stmts.length - 1];
+                if (lastStmt.type === "If" && !lastStmt.elseBody && lastStmt.body && lastStmt.body.body.length === 1 && lastStmt.body.body[0].type === "Break") {
+                    node.type = "Repeat";
+                    node.cond = lastStmt.cond; 
+                    stmts.pop(); 
+                }
+            }
+        }
+    } else if (node.type === "For" || node.type === "ForIn" || node.type === "Function") {
+        node.body = optimizeAST(node.body);
+    } else if (node.type === "LocalAssignment" || node.type === "Assignment") {
+        if (node.right && node.right.type === "Function") {
+            node.right.body = optimizeAST(node.right.body);
+        }
+    }
+    
+    return node;
+}
+
 function stringifyAST(node, ind) {
     if (!node) return "";
     let p = "    ".repeat(ind);
@@ -187,10 +254,25 @@ function stringifyAST(node, ind) {
         case "CallStatement": return `${p}${stringifyAST(node.call, 0)}`;
         case "Call": return node.isMethod ? `${stringifyAST(node.func.obj, 0)}:${node.func.func}(${node.args.map(a => stringifyAST(a, 0)).join(", ")})` : `${stringifyAST(node.func, 0)}(${node.args.map(a => stringifyAST(a, 0)).join(", ")})`;
         case "Return": return `${p}return ${node.args.map(a => stringifyAST(a, 0)).join(", ")}`;
-        case "If": return `${p}if ${stringifyAST(node.cond, 0)} then\n${stringifyAST(node.body, ind+1)}\n${node.elseBody ? p + "else\n" + stringifyAST(node.elseBody, ind+1) + "\n" : ""}${p}end`;
+        case "If": 
+            let out = `${p}if ${stringifyAST(node.cond, 0)} then\n${stringifyAST(node.body, ind+1)}`;
+            let currElse = node.elseBody;
+            
+            // ELSEIF РАЗВЕРТЫВАНИЕ
+            while (currElse && currElse.body && currElse.body.length === 1 && currElse.body[0].type === "If") {
+                let nextIf = currElse.body[0];
+                out += `\n${p}elseif ${stringifyAST(nextIf.cond, 0)} then\n${stringifyAST(nextIf.body, ind+1)}`;
+                currElse = nextIf.elseBody;
+            }
+            if (currElse && currElse.body && currElse.body.length > 0) {
+                out += `\n${p}else\n${stringifyAST(currElse, ind+1)}`;
+            }
+            out += `\n${p}end`;
+            return out;
         case "While": return `${p}while ${stringifyAST(node.cond, 0)} do\n${stringifyAST(node.body, ind+1)}\n${p}end`;
+        case "Repeat": return `${p}repeat\n${stringifyAST(node.body, ind+1)}\n${p}until ${stringifyAST(node.cond, 0)}`;
         case "For": return `${p}for ${node.vars} = ${stringifyAST(node.start, 0)}, ${stringifyAST(node.end, 0)}${node.step ? ", " + stringifyAST(node.step, 0) : ""} do\n${stringifyAST(node.body, ind+1)}\n${p}end`;
-        case "ForIn": return `${p}for ${node.vars.join(", ")} in pairs(${stringifyAST(node.iters, 0)}) do\n${stringifyAST(node.body, ind+1)}\n${p}end`;
+        case "ForIn": return `${p}for ${node.vars.join(", ")} in ipairs(${stringifyAST(node.iters, 0)}) do\n${stringifyAST(node.body, ind+1)}\n${p}end`;
         case "Break": return `${p}break`;
         case "Index": return `${stringifyAST(node.obj, 0)}[${stringifyAST(node.prop, 0)}]`;
         case "IndexProp": return `${stringifyAST(node.obj, 0)}.${node.prop}`;
@@ -209,6 +291,7 @@ function stringifyAST(node, ind) {
         case "UnaryExpression": return `${node.op}${node.op === "not" ? " " : ""}${stringifyAST(node.arg, 0)}`;
         case "Function": return `function(${node.args.join(", ")})\n${stringifyAST(node.body, ind+1)}\n${p}end`;
         case "Vararg": return "...";
+        case "Group": return `(${stringifyAST(node.exp, 0)})`;
     }
     return "";
 }
@@ -291,10 +374,17 @@ function lift(p, allprotos, getProtoCode) {
         }
 
         if (loopHeaders[pc]) {
-            let loopBody = [];
-            let whileNode = { type: "While", cond: { type: "Literal", value: "true" }, body: { type: "Block", body: loopBody } };
-            pushNode(whileNode);
-            scopeStack.push({ body: loopBody, endPc: loopHeaders[pc] + 1, owner: whileNode });
+            let sourcePc = loopHeaders[pc];
+            let srcOp = p.instrs[sourcePc] & 0xFF;
+            let srcOpName = opcodes[srcOp];
+            
+            // Если прыжок инициирован НЕ циклом FOR, создаем while
+            if (!srcOpName || !srcOpName.startsWith("FOR")) {
+                let loopBody = [];
+                let whileNode = { type: "While", cond: { type: "Literal", value: "true" }, body: { type: "Block", body: loopBody } };
+                pushNode(whileNode);
+                scopeStack.push({ body: loopBody, endPc: sourcePc + 1, owner: whileNode });
+            }
         }
 
         let raw = p.instrs[pc];
@@ -382,13 +472,24 @@ function lift(p, allprotos, getProtoCode) {
             let offset = opname === "JUMPX" ? (raw >> 8) : sbx;
             let target = pc + offset + 1;
             
-            let currScope = scopeStack[scopeStack.length - 1];
-            if (currScope.owner && currScope.owner.type === "If" && !currScope.owner.elseBody && (pc + 1 === currScope.endPc || pc + (hasAux?2:1) === currScope.endPc)) {
-                let elseBody = [];
-                currScope.owner.elseBody = { type: "Block", body: elseBody };
-                currScope.endPc = target;
-                scopeStack.pop();
-                scopeStack.push({ body: elseBody, endPc: target, owner: currScope.owner });
+            if (offset >= 0) {
+                let isBreak = false;
+                for (let i = scopeStack.length - 1; i >= 0; i--) {
+                    let scope = scopeStack[i];
+                    if (scope.owner && (scope.owner.type === "While" || scope.owner.type === "For" || scope.owner.type === "ForIn" || scope.owner.type === "Repeat")) {
+                        if (target > scope.endPc) {
+                            isBreak = true;
+                        }
+                        break;
+                    }
+                }
+                
+                let currentScope = scopeStack[scopeStack.length - 1];
+                if (currentScope.owner && currentScope.owner.type === "If" && pc === currentScope.endPc - 1) {
+                    // Это прыжок обхода else блока, он уже учтен. Ничего не делаем.
+                } else if (isBreak) {
+                    pushNode({ type: "Break" });
+                }
             }
         }
         else if (opname.startsWith("JUMPIF") || opname.startsWith("JUMPXEQ")) {
@@ -421,10 +522,36 @@ function lift(p, allprotos, getProtoCode) {
 
             let target = pc + sbx + 1;
             if (fwd) {
-                let ifBody = [];
-                let ifNode = { type: "If", cond: cnd, body: { type: "Block", body: ifBody } };
-                pushNode(ifNode);
-                scopeStack.push({ body: ifBody, endPc: target, owner: ifNode });
+                let isElse = false;
+                let elseTarget = -1;
+                
+                // Распознавание IF-ELSE (Прыжок перед концом if)
+                if (target - 1 >= 0 && target - 1 < p.instrs.length) {
+                    let beforeTargetOp = p.instrs[target - 1] & 0xFF;
+                    let beforeTargetOpName = opcodes[beforeTargetOp];
+                    if (beforeTargetOpName === "JUMP" || beforeTargetOpName === "JUMPX") {
+                        isElse = true;
+                        let jmpRaw = p.instrs[target - 1];
+                        let jmpSbx = (jmpRaw >>> 16) & 0xFFFF;
+                        if (jmpSbx >= 32768) jmpSbx -= 65536;
+                        let jmpOffset = beforeTargetOpName === "JUMPX" ? (jmpRaw >> 8) : jmpSbx;
+                        elseTarget = (target - 1) + jmpOffset + 1;
+                    }
+                }
+
+                if (isElse) {
+                    let ifBody = [];
+                    let elseBody = [];
+                    let ifNode = { type: "If", cond: cnd, body: { type: "Block", body: ifBody }, elseBody: { type: "Block", body: elseBody } };
+                    pushNode(ifNode);
+                    scopeStack.push({ body: elseBody, endPc: elseTarget, owner: ifNode });
+                    scopeStack.push({ body: ifBody, endPc: target - 1, owner: ifNode });
+                } else {
+                    let ifBody = [];
+                    let ifNode = { type: "If", cond: cnd, body: { type: "Block", body: ifBody } };
+                    pushNode(ifNode);
+                    scopeStack.push({ body: ifBody, endPc: target, owner: ifNode });
+                }
             } else {
                 pushNode({ type: "If", cond: { type: "UnaryExpression", op: "not", arg: cnd }, body: { type: "Block", body: [{type: "Break"}] }});
             }
@@ -641,6 +768,7 @@ function process(base64str) {
         };
         
         let finalAST = lift(allprotos[mainindex], allprotos, getProtoCode);
+        finalAST = optimizeAST(finalAST);
         let finalCode = stringifyAST(finalAST, 0);
         return finalCode.length > 0 ? finalCode : "";
 
