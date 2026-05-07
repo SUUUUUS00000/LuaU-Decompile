@@ -63,10 +63,10 @@ function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, u
             }
         }
         
-        let p_instrs = [];
-        let p_consts =[];
+        let p_instrs =[];
+        let p_consts = [];
         let p_protos = [];
-        let p_locvars = [];
+        let p_locvars =[];
         let p_upvalues =[];
         let p_protoname = "anonymous";
 
@@ -110,7 +110,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, u
                     }
                     else if (type === 6) p_consts.push({ t: 'closure', id: r.readvarint() });
                     else if (type === 7) { r.offset += 16; p_consts.push({ t: 'vector', v: 'Vector3.new()' }); }
-                    else throw new Error(`Unknown const type ${type} at idx ${i}`);
+                    else throw new Error("UNK");
                 }
             } else if (block === "protos") {
                 let protocount = r.readvarint();
@@ -170,7 +170,6 @@ function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, u
 
 function optimizeAST(node) {
     if (!node) return node;
-    
     if (node.type === "Block") {
         for (let i = 0; i < node.body.length; i++) {
             node.body[i] = optimizeAST(node.body[i]);
@@ -179,7 +178,6 @@ function optimizeAST(node) {
     } else if (node.type === "If") {
         node.body = optimizeAST(node.body);
         if (node.elseBody) node.elseBody = optimizeAST(node.elseBody);
-        
         if (!node.elseBody && node.body && node.body.body && node.body.body.length === 1) {
             let inner = node.body.body[0];
             if (inner.type === "If" && !inner.elseBody) {
@@ -188,46 +186,13 @@ function optimizeAST(node) {
                 return optimizeAST(node); 
             }
         }
-
-        if (node.elseBody && node.body && node.body.body.length === 1 && node.elseBody.body.length === 1) {
-            let tStmt = node.body.body[0];
-            let eStmt = node.elseBody.body[0];
-            if ((tStmt.type === "Assignment" && eStmt.type === "Assignment") || 
-                (tStmt.type === "LocalAssignment" && eStmt.type === "LocalAssignment")) {
-                if (stringifyAST(tStmt.left, 0) === stringifyAST(eStmt.left, 0)) {
-                    return {
-                        type: tStmt.type,
-                        left: tStmt.left,
-                        right: {
-                            type: "BinaryExpression", op: "or",
-                            left: { type: "BinaryExpression", op: "and", left: node.cond, right: tStmt.right },
-                            right: eStmt.right
-                        }
-                    };
-                }
-            }
-        }
-    } else if (node.type === "While") {
-        node.body = optimizeAST(node.body);
-        if (node.cond && node.cond.value === "true" && node.body && node.body.body) {
-            let stmts = node.body.body;
-            if (stmts.length > 0) {
-                let lastStmt = stmts[stmts.length - 1];
-                if (lastStmt.type === "If" && !lastStmt.elseBody && lastStmt.body && lastStmt.body.body.length === 1 && lastStmt.body.body[0].type === "Break") {
-                    node.type = "Repeat";
-                    node.cond = lastStmt.cond; 
-                    stmts.pop(); 
-                }
-            }
-        }
-    } else if (node.type === "For" || node.type === "ForIn" || node.type === "Function") {
+    } else if (node.type === "For" || node.type === "ForIn" || node.type === "Function" || node.type === "While") {
         node.body = optimizeAST(node.body);
     } else if (node.type === "LocalAssignment" || node.type === "Assignment") {
         if (node.right && node.right.type === "Function") {
             node.right.body = optimizeAST(node.right.body);
         }
     }
-    
     return node;
 }
 
@@ -239,7 +204,7 @@ function stringifyAST(node, ind) {
         case "Block": return node.body.map(n => stringifyAST(n, ind)).filter(x => x).join("\n");
         case "Assignment": 
             if (node.right && node.right.type === "Function") {
-                return `${p}function ${stringifyAST(node.left, 0)}(${node.right.args.join(", ")})\n${stringifyAST(node.right.body, ind+1)}\n${p}end`;
+                return `${p}${stringifyAST(node.left, 0)} = function(${node.right.args.join(", ")})\n${stringifyAST(node.right.body, ind+1)}\n${p}end`;
             }
             return `${p}${stringifyAST(node.left, 0)} = ${stringifyAST(node.right, ind)}`;
         case "LocalAssignment":
@@ -247,17 +212,20 @@ function stringifyAST(node, ind) {
                 return `${p}local function ${stringifyAST(node.left, 0)}(${node.right.args.join(", ")})\n${stringifyAST(node.right.body, ind+1)}\n${p}end`;
             }
             return `${p}local ${stringifyAST(node.left, 0)} = ${stringifyAST(node.right, ind)}`;
-        case "MultiAssignment": return `${p}local ${node.left.map(x => stringifyAST(x,0)).join(", ")} = ${stringifyAST(node.right, ind)}`;
-        case "CallStatement": return `${p}${stringifyAST(node.call, ind)}`;
+        case "MultiAssignment": 
+            return `${p}${node.isLocal ? "local " : ""}${node.left.map(x => stringifyAST(x,0)).join(", ")} = ${stringifyAST(node.right, ind)}`;
+        case "CallStatement": 
+            return `${p}${stringifyAST(node.call, ind)}`;
         case "Call": {
             let funcStr = stringifyAST(node.func, ind);
             if (node.func && node.func.type === "Function") {
                 funcStr = `(${funcStr})`;
             }
-            return node.isMethod ? `${stringifyAST(node.func.obj, 0)}:${node.func.func}(${node.args.map(a => stringifyAST(a, 0)).join(", ")})` : `${funcStr}(${node.args.map(a => stringifyAST(a, 0)).join(", ")})`;
+            let argsStr = node.args.map(a => stringifyAST(a, 0)).join(", ");
+            return node.isMethod ? `${stringifyAST(node.func.obj, 0)}:${node.func.func}(${argsStr})` : `${funcStr}(${argsStr})`;
         }
         case "Return": return `${p}return ${node.args.map(a => stringifyAST(a, 0)).join(", ")}`;
-        case "If": 
+        case "If": {
             let out = `${p}if ${stringifyAST(node.cond, 0)} then\n${stringifyAST(node.body, ind+1)}`;
             let currElse = node.elseBody;
             while (currElse && currElse.body && currElse.body.length === 1 && currElse.body[0].type === "If") {
@@ -270,8 +238,8 @@ function stringifyAST(node, ind) {
             }
             out += `\n${p}end`;
             return out;
+        }
         case "While": return `${p}while ${stringifyAST(node.cond, 0)} do\n${stringifyAST(node.body, ind+1)}\n${p}end`;
-        case "Repeat": return `${p}repeat\n${stringifyAST(node.body, ind+1)}\n${p}until ${stringifyAST(node.cond, 0)}`;
         case "For": return `${p}for ${node.vars} = ${stringifyAST(node.start, 0)}, ${stringifyAST(node.end, 0)}${node.step ? ", " + stringifyAST(node.step, 0) : ""} do\n${stringifyAST(node.body, ind+1)}\n${p}end`;
         case "ForIn": 
             let iterStr = node.iterFunc ? `${node.iterFunc}(${stringifyAST(node.iters, 0)})` : stringifyAST(node.iters, 0);
@@ -302,28 +270,13 @@ function stringifyAST(node, ind) {
 function lift(p, allprotos, getProtoCode) {
     if (!p || !p.instrs || p.instrs.length === 0) return { type: "Block", body:[] };
 
-    let definedVars = new Set();
-    let namecalls = {};
     let regs = new Array(256).fill(null);
-
+    let namecalls = {};
     let getInstrSize = (pc) => {
         let op = p.instrs[pc] & 0xFF;
         let opname = opcodes[op] || "UNKNOWN";
         return aux_opcodes.has(opname) ? 2 : 1;
     };
-
-    let loopStarts = {};
-    for (let i = 0; i < p.instrs.length; ) {
-        let op = p.instrs[i] & 0xFF;
-        let opname = opcodes[op] || "UNKNOWN";
-        let bx = (p.instrs[i] >>> 16) & 0xFFFF;
-        
-        if (opname === "JUMPBACK") {
-            let targetPc = i - bx + 1;
-            loopStarts[targetPc] = { tailPc: i, type: opname };
-        }
-        i += getInstrSize(i);
-    }
 
     let getNamedLocal = (reg, currentPc) => {
         if (p.locvars) {
@@ -333,17 +286,12 @@ function lift(p, allprotos, getProtoCode) {
         return null;
     };
 
-    for (let i = 0; i < p.numparams; i++) {
-        let name = getNamedLocal(i, 0) || `v${i}`;
-        definedVars.add(name);
-        regs[i] = { type: "Identifier", name: name };
-    }
-
     let getR = (r, currentPc) => regs[r] || { type: "Identifier", name: getNamedLocal(r, currentPc) || `v${r}` };
 
-    function parseBlock(startPc, endPc) {
+    function parseBlock(startPc, endPc, parentScope) {
         let body =[];
         let pc = startPc;
+        let localScope = new Set(parentScope);
 
         let handleRegAssign = (reg, node, forceEmit = false) => {
             let name = getNamedLocal(reg, pc);
@@ -351,8 +299,8 @@ function lift(p, allprotos, getProtoCode) {
                 let vName = name || `v${reg}`;
                 let idNode = { type: "Identifier", name: vName };
                 let assignNode;
-                if (!definedVars.has(vName)) {
-                    definedVars.add(vName);
+                if (!localScope.has(vName)) {
+                    localScope.add(vName);
                     assignNode = { type: "LocalAssignment", left: idNode, right: node };
                 } else {
                     assignNode = { type: "Assignment", left: idNode, right: node };
@@ -366,14 +314,6 @@ function lift(p, allprotos, getProtoCode) {
         };
 
         while (pc < endPc) {
-            if (loopStarts[pc] && pc < loopStarts[pc].tailPc) {
-                let tailPc = loopStarts[pc].tailPc;
-                let loopBody = parseBlock(pc, tailPc);
-                body.push({ type: "While", cond: {type: "Literal", value: "true"}, body: {type: "Block", body: loopBody} });
-                pc = tailPc + getInstrSize(tailPc);
-                continue;
-            }
-
             let raw = p.instrs[pc];
             let op = raw & 0xFF;
             let opname = opcodes[op] || "UNKNOWN";
@@ -393,87 +333,79 @@ function lift(p, allprotos, getProtoCode) {
 
             if (opname === "FORNPREP" || opname.startsWith("FORGPREP")) {
                 let loopTail = pc + sbx + 1;
-                let loopEnd = loopTail + getInstrSize(loopTail);
-                let loopBody = parseBlock(pc + size, loopTail);
+                let loopBody = parseBlock(pc + size, loopTail, localScope);
                 
                 if (opname === "FORNPREP") {
-                    body.push({ type: "For", vars: getNamedLocal(a+2, pc)||`v${a+2}`, start: getR(a, pc), end: getR(a+1, pc), step: getR(a+2, pc), body: {type: "Block", body: loopBody} });
+                    let vName = getNamedLocal(a+2, pc)||`v${a+2}`;
+                    localScope.add(vName);
+                    body.push({ type: "For", vars: vName, start: getR(a, pc), end: getR(a+1, pc), step: getR(a+2, pc), body: {type: "Block", body: loopBody} });
                 } else {
                     let iter = null;
                     if (opname === "FORGPREP_INEXT") iter = "ipairs";
                     else if (opname === "FORGPREP_NEXT") iter = "pairs";
 
-                    let var1 = getNamedLocal(a+3, pc)||`v${a+3}`;
-                    let var2 = getNamedLocal(a+4, pc)||`v${a+4}`;
-                    body.push({ type: "ForIn", vars: [var1, var2], iterFunc: iter, iters: getR(a, pc), body: {type: "Block", body: loopBody} });
+                    let v1 = getNamedLocal(a+3, pc)||`v${a+3}`;
+                    let v2 = getNamedLocal(a+4, pc)||`v${a+4}`;
+                    localScope.add(v1);
+                    localScope.add(v2);
+                    body.push({ type: "ForIn", vars: [v1, v2], iterFunc: iter, iters: getR(a, pc), body: {type: "Block", body: loopBody} });
                 }
-                pc = loopEnd;
+                pc = loopTail + getInstrSize(loopTail);
                 continue;
             }
 
             if (opname.startsWith("JUMPIF") || opname.startsWith("JUMPXEQ")) {
-                let offset = sbx;
-                let fwd = sbx >= 0;
-                let cnd = { type: "Literal", value: "true" };
+                let offset = opname.startsWith("JUMPXEQ") ? (aux | 0) : sbx;
+                let fwd = offset >= 0;
+                let cnd;
                 let left = getR(a, pc);
 
                 if (opname.startsWith("JUMPXEQ")) {
-                    offset = aux | 0;
-                    fwd = offset >= 0;
                     let kn = p.consts[bx] ? formatK(p.consts[bx]) : { type: "Literal", value: "unk" };
-                    if (opname === "JUMPXEQKNIL") cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: { type: "Literal", value: "nil" } };
+                    if (opname === "JUMPXEQKNIL") cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: { type: "Literal", value: "nil" } };
                     else if (opname === "JUMPXEQKB") {
                         let kb = ((raw >>> 16) & 0xFF) === 1 ? "true" : "false";
-                        cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: { type: "Literal", value: kb } };
+                        cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: { type: "Literal", value: kb } };
                     }
-                    else cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: kn };
+                    else cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: kn };
                 } else {
                     let rightR = getR(aux & 0xFF, pc);
-                    if (opname === "JUMPIF") cnd = fwd ? { type: "UnaryExpression", op: "not", arg: left } : left;
-                    else if (opname === "JUMPIFNOT") cnd = fwd ? left : { type: "UnaryExpression", op: "not", arg: left };
-                    else if (opname === "JUMPIFEQ") cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: rightR };
-                    else if (opname === "JUMPIFNOTEQ") cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: rightR };
-                    else if (opname === "JUMPIFLE") cnd = { type: "BinaryExpression", op: fwd ? ">" : "<=", left: left, right: rightR };
-                    else if (opname === "JUMPIFNOTLE") cnd = { type: "BinaryExpression", op: fwd ? "<=" : ">", left: left, right: rightR };
-                    else if (opname === "JUMPIFLT") cnd = { type: "BinaryExpression", op: fwd ? ">=" : "<", left: left, right: rightR };
-                    else if (opname === "JUMPIFNOTLT") cnd = { type: "BinaryExpression", op: fwd ? "<" : ">=", left: left, right: rightR };
+                    if (opname === "JUMPIF") cnd = fwd ? left : { type: "UnaryExpression", op: "not", arg: left };
+                    else if (opname === "JUMPIFNOT") cnd = fwd ? { type: "UnaryExpression", op: "not", arg: left } : left;
+                    else if (opname === "JUMPIFEQ") cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: rightR };
+                    else if (opname === "JUMPIFNOTEQ") cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: rightR };
+                    else if (opname === "JUMPIFLE") cnd = { type: "BinaryExpression", op: fwd ? "<=" : ">", left: left, right: rightR };
+                    else if (opname === "JUMPIFNOTLE") cnd = { type: "BinaryExpression", op: fwd ? ">" : "<=", left: left, right: rightR };
+                    else if (opname === "JUMPIFLT") cnd = { type: "BinaryExpression", op: fwd ? "<" : ">=", left: left, right: rightR };
+                    else if (opname === "JUMPIFNOTLT") cnd = { type: "BinaryExpression", op: fwd ? ">=" : "<", left: left, right: rightR };
                 }
 
                 let target = pc + offset + 1;
-
-                if (!fwd || target > endPc) {
-                    body.push({ type: "If", cond: {type:"UnaryExpression", op:"not", arg:cnd}, body: {type: "Block", body:[{type: "Break"}]} });
-                    pc += size;
-                    continue;
-                }
-
-                let prevPc = pc;
-                let curr = pc + size;
-                while (curr < target) {
-                    prevPc = curr;
-                    curr += getInstrSize(curr);
-                }
-
+                
+                if (target > endPc) target = endPc;
+                
+                let trueEnd = target;
                 let hasElse = false;
                 let elseTarget = target;
-                let trueEnd = target;
 
-                if (prevPc < target && (getOp(prevPc) === "JUMP" || getOp(prevPc) === "JUMPX")) {
-                    let prevOp = getOp(prevPc);
-                    let jmpOffset = prevOp === "JUMPX" ? (p.instrs[prevPc] >> 8) : (p.instrs[prevPc] >>> 16) & 0xFFFF;
-                    if (prevOp !== "JUMPX" && jmpOffset >= 32768) jmpOffset -= 65536;
-                    
-                    let candElseTarget = prevPc + jmpOffset + 1;
-                    if (candElseTarget > target && candElseTarget <= endPc) {
-                        hasElse = true;
-                        trueEnd = prevPc;
-                        elseTarget = candElseTarget;
+                let lastTruePc = target - 1;
+                if (lastTruePc >= pc + size) {
+                    let lastOp = opcodes[p.instrs[lastTruePc] & 0xFF];
+                    if (lastOp === "JUMP" || lastOp === "JUMPX") {
+                        let jOff = lastOp === "JUMPX" ? (p.instrs[lastTruePc] >> 8) : ((p.instrs[lastTruePc] >>> 16) & 0xFFFF);
+                        if (lastOp !== "JUMPX" && jOff >= 32768) jOff -= 65536;
+                        let eTarg = lastTruePc + jOff + 1;
+                        if (eTarg > target && eTarg <= endPc) {
+                            hasElse = true;
+                            trueEnd = lastTruePc;
+                            elseTarget = eTarg;
+                        }
                     }
                 }
 
-                let trueBody = parseBlock(pc + size, trueEnd);
+                let trueBody = parseBlock(pc + size, trueEnd, localScope);
                 if (hasElse) {
-                    let elseBody = parseBlock(target, elseTarget);
+                    let elseBody = parseBlock(target, elseTarget, localScope);
                     body.push({ type: "If", cond: cnd, body: {type:"Block", body:trueBody}, elseBody: {type:"Block", body:elseBody} });
                     pc = elseTarget;
                 } else {
@@ -483,10 +415,10 @@ function lift(p, allprotos, getProtoCode) {
                 continue;
             }
 
-            if (opname === "JUMP" || opname === "JUMPX") {
+            if (opname === "JUMP" || opname === "JUMPX" || opname === "JUMPBACK") {
                 let offset = opname === "JUMPX" ? (raw >> 8) : sbx;
                 let target = pc + offset + 1;
-                if (target > endPc) {
+                if (target > endPc && opname !== "JUMPBACK") {
                     body.push({ type: "Break" });
                 }
                 pc += size;
@@ -528,10 +460,13 @@ function lift(p, allprotos, getProtoCode) {
             else if (opname === "CALL") {
                 let nc = namecalls[a];
                 let args =[];
+                let startIdx = nc ? a + 2 : a + 1;
+                
                 if (b === 0) args.push({ type: "Vararg" });
                 else {
-                    let startIdx = nc ? 2 : 1;
-                    for (let j = startIdx; j <= b - 1; j++) args.push(getR(a + j, pc));
+                    let numArgs = nc ? b - 2 : b - 1;
+                    for (let j = 0; j <= numArgs; j++) args.push(getR(startIdx + j, pc));
+                    args = args.filter(x => x !== undefined);
                 }
                 
                 let callNode = nc ? { type: "Call", isMethod: true, func: nc, args: args } : { type: "Call", isMethod: false, func: getR(a, pc), args: args };
@@ -543,13 +478,17 @@ function lift(p, allprotos, getProtoCode) {
                     assignNode = handleRegAssign(a, callNode, true);
                 } else {
                     let leftVars =[];
+                    let isLocalSet = false;
                     for (let j = 0; j < c - 1; j++) {
                         let n = getNamedLocal(a + j, pc) || `v${a + j}`;
                         leftVars.push({ type: "Identifier", name: n });
                         regs[a + j] = leftVars[j];
-                        definedVars.add(n);
+                        if (!localScope.has(n)) {
+                            localScope.add(n);
+                            isLocalSet = true;
+                        }
                     }
-                    body.push({ type: "MultiAssignment", left: leftVars, right: callNode });
+                    body.push({ type: "MultiAssignment", left: leftVars, right: callNode, isLocal: isLocalSet });
                 }
             }
             else if (opname === "RETURN") {
@@ -593,7 +532,6 @@ function lift(p, allprotos, getProtoCode) {
             }
             else if (opname === "GETUPVAL") assignNode = handleRegAssign(a, { type: "Identifier", name: p.upvalues[b] || `upval_${b}` }, false);
             else if (opname === "SETUPVAL") body.push({ type: "Assignment", left: { type: "Identifier", name: p.upvalues[b] || `upval_${b}` }, right: getR(a, pc) });
-            
             else if (opname === "NEWCLOSURE" || opname === "DUPCLOSURE") {
                 let pIdx = opname === "NEWCLOSURE" ? bx : (p.consts[bx] ? p.consts[bx].id : 0);
                 assignNode = handleRegAssign(a, getProtoCode(pIdx), false);
@@ -616,11 +554,17 @@ function lift(p, allprotos, getProtoCode) {
             pc += size;
         }
 
-        function getOp(p_c) { return opcodes[p.instrs[p_c] & 0xFF] || "UNKNOWN"; }
         return body;
     }
 
-    return { type: "Block", body: parseBlock(0, p.instrs.length) };
+    let initialScope = new Set();
+    for (let i = 0; i < p.numparams; i++) {
+        let n = getNamedLocal(i, 0) || `v${i}`;
+        initialScope.add(n);
+        regs[i] = { type: "Identifier", name: n };
+    }
+
+    return { type: "Block", body: parseBlock(0, p.instrs.length, initialScope) };
 }
 
 function process(base64str) {
@@ -645,10 +589,10 @@ function process(base64str) {
         };
 
         let version = r.readbyte();
-        if (version < 3 || version > 7) return "-- [DECOMPILER ERROR] Unsupported bytecode version: " + version;
+        if (version < 3 || version > 7) return "";
         
         let savedGlobalOffset = r.offset;
-        let globalActionFlagOptions = (version >= 4) ?[true, false] : [false];
+        let globalActionFlagOptions = (version >= 4) ? [true, false] : [false];
         
         let structuralOptions =[
             { typeinfo: false, upvalues: false },
@@ -732,13 +676,13 @@ function process(base64str) {
         }
 
         if (!found) {
-            return "--[DECOMPILER ERROR] Invalid main proto index or failed to determine bytecode structure.";
+            return "";
         }
         
         let activeProtos = new Set();
         let getProtoCode = (pIdx) => {
             let cp = allprotos[pIdx];
-            if (!cp || activeProtos.has(pIdx)) return { type: "Function", args: [], body: { type: "Block", body:[] } };
+            if (!cp || activeProtos.has(pIdx)) return { type: "Function", args:[], body: { type: "Block", body:[] } };
             if (cp.astNode) return cp.astNode;
             
             activeProtos.add(pIdx);
@@ -764,10 +708,10 @@ function process(base64str) {
         let finalAST = lift(allprotos[mainindex], allprotos, getProtoCode);
         finalAST = optimizeAST(finalAST);
         let finalCode = stringifyAST(finalAST, 0);
-        return finalCode.length > 0 ? finalCode : "-- [DECOMPILER MSG] Decompiled successfully, but the output was empty.";
+        return finalCode.length > 0 ? finalCode : "";
 
     } catch (e) {
-        return `-- [DECOMPILER CRASH]\n-- ${e.message}\n-- ${e.stack.split('\n').join('\n-- ')}`;
+        return "";
     }
 }
 
