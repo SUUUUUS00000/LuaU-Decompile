@@ -65,8 +65,8 @@ function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, u
         
         let p_instrs =[];
         let p_consts = [];
-        let p_protos = [];
-        let p_locvars =[];
+        let p_protos =[];
+        let p_locvars = [];
         let p_upvalues =[];
         let p_protoname = "anonymous";
 
@@ -91,7 +91,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, u
                     else if (type === 4) {
                         let id = r.readuint32();
                         let count = id >>> 30;
-                        let arr =[];
+                        let arr = [];
                         let getval = (idx) => { 
                             let c = p_consts[idx]; 
                             if (!c) return `unk_${idx}`;
@@ -355,19 +355,21 @@ function lift(p, allprotos, getProtoCode) {
             }
 
             if (opname.startsWith("JUMPIF") || opname.startsWith("JUMPXEQ")) {
-                let offset = opname.startsWith("JUMPXEQ") ? (aux | 0) : sbx;
+                let offset = sbx;
                 let fwd = offset >= 0;
                 let cnd;
                 let left = getR(a, pc);
 
                 if (opname.startsWith("JUMPXEQ")) {
-                    let kn = p.consts[bx] ? formatK(p.consts[bx]) : { type: "Literal", value: "unk" };
-                    if (opname === "JUMPXEQKNIL") cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: { type: "Literal", value: "nil" } };
-                    else if (opname === "JUMPXEQKB") {
-                        let kb = ((raw >>> 16) & 0xFF) === 1 ? "true" : "false";
+                    if (opname === "JUMPXEQKNIL") {
+                        cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: { type: "Literal", value: "nil" } };
+                    } else if (opname === "JUMPXEQKB") {
+                        let kb = (aux & 1) === 1 ? "true" : "false";
                         cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: { type: "Literal", value: kb } };
+                    } else {
+                        let kn = p.consts[aux & 0xFFFFFF] ? formatK(p.consts[aux & 0xFFFFFF]) : { type: "Literal", value: "unk" };
+                        cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: kn };
                     }
-                    else cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: kn };
                 } else {
                     let rightR = getR(aux & 0xFF, pc);
                     if (opname === "JUMPIF") cnd = fwd ? left : { type: "UnaryExpression", op: "not", arg: left };
@@ -381,7 +383,6 @@ function lift(p, allprotos, getProtoCode) {
                 }
 
                 let target = pc + offset + 1;
-                
                 if (target > endPc) target = endPc;
                 
                 let trueEnd = target;
@@ -682,7 +683,7 @@ function process(base64str) {
         let activeProtos = new Set();
         let getProtoCode = (pIdx) => {
             let cp = allprotos[pIdx];
-            if (!cp || activeProtos.has(pIdx)) return { type: "Function", args:[], body: { type: "Block", body:[] } };
+            if (!cp || activeProtos.has(pIdx)) return { type: "Function", args: [], body: { type: "Block", body:[] } };
             if (cp.astNode) return cp.astNode;
             
             activeProtos.add(pIdx);
