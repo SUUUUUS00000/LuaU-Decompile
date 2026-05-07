@@ -16,7 +16,8 @@ const aux_opcodes = new Set([
     "GETGLOBAL", "SETGLOBAL", "GETIMPORT", "GETTABLEKS", "SETTABLEKS", "NAMECALL",
     "JUMPIFEQ", "JUMPIFNOTEQ", "JUMPIFLE", "JUMPIFNOTLE", "JUMPIFLT", "JUMPIFNOTLT",
     "JUMPXEQKNIL", "JUMPXEQKB", "JUMPXEQKN", "JUMPXEQKS",
-    "FORGLOOP", "LOADKX", "SETLIST", "NEWTABLE", "DUPTABLE"
+    "FORGLOOP", "LOADKX", "SETLIST", "NEWTABLE", "DUPTABLE", "JUMPX",
+    "FASTCALL1", "FASTCALL2", "FASTCALL2K", "FASTCALL3"
 ]);
 
 function formatKVal(k) {
@@ -246,8 +247,14 @@ function stringifyAST(node, ind) {
             }
             return `${p}local ${stringifyAST(node.left, 0)} = ${stringifyAST(node.right, ind)}`;
         case "MultiAssignment": return `${p}local ${node.left.map(x => stringifyAST(x,0)).join(", ")} = ${stringifyAST(node.right, ind)}`;
-        case "CallStatement": return `${p}${stringifyAST(node.call, 0)}`;
-        case "Call": return node.isMethod ? `${stringifyAST(node.func.obj, 0)}:${node.func.func}(${node.args.map(a => stringifyAST(a, 0)).join(", ")})` : `${stringifyAST(node.func, 0)}(${node.args.map(a => stringifyAST(a, 0)).join(", ")})`;
+        case "CallStatement": return `${p}${stringifyAST(node.call, ind)}`;
+        case "Call": {
+            let funcStr = stringifyAST(node.func, ind);
+            if (node.func && node.func.type === "Function") {
+                funcStr = `(${funcStr})`;
+            }
+            return node.isMethod ? `${stringifyAST(node.func.obj, 0)}:${node.func.func}(${node.args.map(a => stringifyAST(a, 0)).join(", ")})` : `${funcStr}(${node.args.map(a => stringifyAST(a, 0)).join(", ")})`;
+        }
         case "Return": return `${p}return ${node.args.map(a => stringifyAST(a, 0)).join(", ")}`;
         case "If": 
             let out = `${p}if ${stringifyAST(node.cond, 0)} then\n${stringifyAST(node.body, ind+1)}`;
