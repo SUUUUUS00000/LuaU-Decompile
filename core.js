@@ -14,8 +14,9 @@ permute(["instrs", "consts", "protos", "debug"]);
 
 const aux_opcodes = new Set([
     "GETGLOBAL", "SETGLOBAL", "GETIMPORT", "GETTABLEKS", "SETTABLEKS", "NAMECALL",
+    "JUMPIFEQ", "JUMPIFNOTEQ", "JUMPIFLE", "JUMPIFNOTLE", "JUMPIFLT", "JUMPIFNOTLT",
     "JUMPXEQKNIL", "JUMPXEQKB", "JUMPXEQKN", "JUMPXEQKS",
-    "FORGLOOP", "LOADKX", "SETLIST", "NEWTABLE", "DUPTABLE", "JUMPX"
+    "FORGLOOP", "LOADKX", "SETLIST", "NEWTABLE", "DUPTABLE"
 ]);
 
 function formatKVal(k) {
@@ -264,7 +265,9 @@ function stringifyAST(node, ind) {
         case "While": return `${p}while ${stringifyAST(node.cond, 0)} do\n${stringifyAST(node.body, ind+1)}\n${p}end`;
         case "Repeat": return `${p}repeat\n${stringifyAST(node.body, ind+1)}\n${p}until ${stringifyAST(node.cond, 0)}`;
         case "For": return `${p}for ${node.vars} = ${stringifyAST(node.start, 0)}, ${stringifyAST(node.end, 0)}${node.step ? ", " + stringifyAST(node.step, 0) : ""} do\n${stringifyAST(node.body, ind+1)}\n${p}end`;
-        case "ForIn": return `${p}for ${node.vars.join(", ")} in ipairs(${stringifyAST(node.iters, 0)}) do\n${stringifyAST(node.body, ind+1)}\n${p}end`;
+        case "ForIn": 
+            let iterStr = node.iterFunc ? `${node.iterFunc}(${stringifyAST(node.iters, 0)})` : stringifyAST(node.iters, 0);
+            return `${p}for ${node.vars.join(", ")} in ${iterStr} do\n${stringifyAST(node.body, ind+1)}\n${p}end`;
         case "Break": return `${p}break`;
         case "Index": return `${stringifyAST(node.obj, 0)}[${stringifyAST(node.prop, 0)}]`;
         case "IndexProp": return `${stringifyAST(node.obj, 0)}.${node.prop}`;
@@ -291,29 +294,29 @@ function stringifyAST(node, ind) {
 function lift(p, allprotos, getProtoCode) {
     if (!p || !p.instrs || p.instrs.length === 0) return { type: "Block", body: [] };
 
-    let loopHeaders = {};
-    for (let pc = 0; pc < p.instrs.length; pc++) {
-        let raw = p.instrs[pc];
-        let op = raw & 0xFF;
-        let opname = opcodes[op] || "UNKNOWN";
-        let bx = (raw >>> 16) & 0xFFFF;
-        let sbx = bx >= 32768 ? bx - 65536 : bx;
-        
-        let hasAux = aux_opcodes.has(opname);
-        let aux = hasAux ? (p.instrs[pc + 1] || 0) : 0;
-
-        if (opname === "JUMPBACK") loopHeaders[pc - bx + 1] = pc;
-        else if (opname === "JUMPX" || opname === "JUMP") {
-            let offset = opname === "JUMPX" ? aux : sbx;
-            if (offset < 0) loopHeaders[pc + offset + 1] = pc;
-        }
-        if (hasAux) pc++;
-    }
-
     let definedVars = new Set();
     let namecalls = {};
-    let pc = 0;
     let regs = new Array(256).fill(null);
+
+    let getInstrSize = (pc) => {
+        let op = p.instrs[pc] & 0xFF;
+        let opname = opcodes[op] || "UNKNOWN";
+        return aux_opcodes.has(opname) ? 2 : 1;
+    };
+
+    let loopStarts = {};
+    for (let i = 0; i < p.instrs.length; ) {
+        let op = p.instrs[i] & 0xFF;
+        let opname = opcodes[op] || "UNKNOWN";
+        let bx = (p.instrs[i] >>> 16) & 0xFFFF;
+        let sbx = bx >= 32768 ? bx - 65536 : bx;
+        
+        if (opname === "JUMPBACK") {
+            let targetPc = i - bx + 1;
+            loopStarts[targetPc] = { tailPc: i, type: opname };
+        }
+        i += getInstrSize(i);
+    }
 
     let getNamedLocal = (reg, currentPc) => {
         if (p.locvars) {
@@ -329,298 +332,272 @@ function lift(p, allprotos, getProtoCode) {
         regs[i] = { type: "Identifier", name: name };
     }
 
-    let getR = (r) => regs[r] || { type: "Identifier", name: getNamedLocal(r, pc) || `v${r}` };
+    let getR = (r, currentPc) => regs[r] || { type: "Identifier", name: getNamedLocal(r, currentPc) || `v${r}` };
 
-    let astBody = [];
-    let scopeStack = [{ body: astBody, endPc: p.instrs.length, owner: null }];
+    function parseBlock(startPc, endPc) {
+        let body = [];
+        let pc = startPc;
 
-    let pushNode = (node) => {
-        if (node) scopeStack[scopeStack.length - 1].body.push(node);
-    };
-
-    let setReg = (reg, node, forceEmit = false) => {
-        let name = getNamedLocal(reg, pc);
-        if (name) {
-            let idNode = { type: "Identifier", name: name };
-            if (!definedVars.has(name)) {
-                definedVars.add(name);
-                pushNode({ type: "LocalAssignment", left: idNode, right: node });
-            } else {
-                pushNode({ type: "Assignment", left: idNode, right: node });
-            }
-            regs[reg] = idNode;
-        } else if (forceEmit) {
-            let tempName = `v${reg}`;
-            let idNode = { type: "Identifier", name: tempName };
-            if (!definedVars.has(tempName)) {
-                definedVars.add(tempName);
-                pushNode({ type: "LocalAssignment", left: idNode, right: node });
-            } else {
-                pushNode({ type: "Assignment", left: idNode, right: node });
-            }
-            regs[reg] = idNode;
-        } else {
-            regs[reg] = node;
-        }
-    };
-
-    while (pc < p.instrs.length) {
-        while (scopeStack.length > 1 && pc >= scopeStack[scopeStack.length - 1].endPc) {
-            scopeStack.pop();
-        }
-
-        if (loopHeaders[pc]) {
-            let sourcePc = loopHeaders[pc];
-            let srcOp = p.instrs[sourcePc] & 0xFF;
-            let srcOpName = opcodes[srcOp];
-            
-            if (!srcOpName || !srcOpName.startsWith("FOR")) {
-                let loopBody = [];
-                let whileNode = { type: "While", cond: { type: "Literal", value: "true" }, body: { type: "Block", body: loopBody } };
-                pushNode(whileNode);
-                scopeStack.push({ body: loopBody, endPc: sourcePc + 1, owner: whileNode });
-            }
-        }
-
-        let raw = p.instrs[pc];
-        let op = raw & 0xFF;
-        let opname = opcodes[op] || "UNKNOWN";
-        let a = (raw >>> 8) & 0xFF;
-        let b = (raw >>> 16) & 0xFF;
-        let c = (raw >>> 24) & 0xFF;
-        let bx = (raw >>> 16) & 0xFFFF;
-        let sbx = bx >= 32768 ? bx - 65536 : bx;
-
-        let hasAux = aux_opcodes.has(opname);
-        let aux = hasAux ? (p.instrs[pc + 1] || 0) : 0;
-        let auxVal = hasAux ? p.consts[(aux >>> 0) & 0xFFFFFF] : null;
-
-        if (opname === "NOP" || opname === "COVERAGE" || opname === "CAPTURE" || opname === "PREPVARARGS" || opname.startsWith("FASTCALL")) {
-            pc += hasAux ? 2 : 1;
-            continue;
-        }
-
-        if (opname === "LOADNIL") setReg(a, { type: "Literal", value: "nil" });
-        else if (opname === "LOADB") setReg(a, { type: "Literal", value: b === 1 ? "true" : "false" });
-        else if (opname === "LOADN") setReg(a, { type: "Literal", value: sbx });
-        else if (opname === "LOADK") setReg(a, formatK(p.consts[bx]));
-        else if (opname === "LOADKX") setReg(a, formatK(auxVal));
-        else if (opname === "MOVE") setReg(a, getR(b));
-        else if (opname === "GETGLOBAL") setReg(a, { type: "Identifier", name: formatKVal(auxVal) }, true);
-        else if (opname === "SETGLOBAL") pushNode({ type: "Assignment", left: { type: "Identifier", name: formatKVal(auxVal) }, right: getR(a) });
-        else if (opname === "GETIMPORT") setReg(a, { type: "Identifier", name: formatKVal(auxVal) }, true);
-        else if (opname === "GETTABLE") setReg(a, { type: "Index", obj: getR(b), prop: getR(c) });
-        else if (opname === "GETTABLEKS") setReg(a, { type: "IndexProp", obj: getR(b), prop: formatKVal(auxVal) });
-        else if (opname === "GETTABLEN") setReg(a, { type: "Index", obj: getR(b), prop: { type: "Literal", value: c + 1 } });
-        else if (opname === "SETTABLE") {
-            if (regs[b] && regs[b].type === "Table") regs[b].entries.push({ key: getR(c), value: getR(a), isBracket: true });
-            else pushNode({ type: "Assignment", left: { type: "Index", obj: getR(b), prop: getR(c) }, right: getR(a) });
-        }
-        else if (opname === "SETTABLEKS") {
-            if (regs[b] && regs[b].type === "Table") regs[b].entries.push({ key: formatKVal(auxVal), value: getR(a), isBracket: false });
-            else pushNode({ type: "Assignment", left: { type: "IndexProp", obj: getR(b), prop: formatKVal(auxVal) }, right: getR(a) });
-        }
-        else if (opname === "SETTABLEN") {
-            if (regs[b] && regs[b].type === "Table") regs[b].entries.push({ key: {type:"Literal", value:c+1}, value: getR(a), isBracket: true });
-            else pushNode({ type: "Assignment", left: { type: "Index", obj: getR(b), prop: { type: "Literal", value: c + 1 } }, right: getR(a) });
-        }
-        else if (opname === "NAMECALL") {
-            namecalls[a] = { obj: getR(b), func: formatKVal(auxVal) };
-            regs[a + 1] = getR(b);
-        }
-        else if (opname === "CALL") {
-            let nc = namecalls[a];
-            let args = [];
-            if (b === 0) args.push({ type: "Vararg" });
-            else {
-                let argcount = b - 1;
-                let startIdx = nc ? 2 : 1;
-                for (let i = startIdx; i <= argcount; i++) args.push(getR(a + i));
-            }
-            
-            let callNode = nc ? { type: "Call", isMethod: true, func: nc, args: args } : { type: "Call", isMethod: false, func: getR(a), args: args };
-            if (nc) delete namecalls[a];
-            
-            if (c - 1 === 0) {
-                pushNode({ type: "CallStatement", call: callNode }); 
-            } else if (c - 1 === 1) {
-                setReg(a, callNode, true);
-            } else {
-                let retCount = c - 1;
-                let leftVars = [];
-                for (let i = 0; i < retCount; i++) {
-                    let n = getNamedLocal(a + i, pc) || `v${a + i}`;
-                    leftVars.push({ type: "Identifier", name: n });
-                    regs[a + i] = leftVars[i];
-                    definedVars.add(n);
-                }
-                pushNode({ type: "MultiAssignment", left: leftVars, right: callNode });
-            }
-        }
-        else if (opname === "RETURN") {
-            let rArgs = [];
-            if (b > 1) {
-                for (let i = 0; i < b - 1; i++) rArgs.push(getR(a + i));
-            } else if (b === 0) rArgs.push({ type: "Vararg" });
-            pushNode({ type: "Return", args: rArgs });
-        }
-        else if (opname === "JUMP" || opname === "JUMPX") {
-            let offset = opname === "JUMPX" ? aux : sbx;
-            let target = pc + offset + 1;
-            
-            if (offset >= 0) {
-                let isBreak = false;
-                for (let i = scopeStack.length - 1; i >= 0; i--) {
-                    let scope = scopeStack[i];
-                    if (scope.owner && (scope.owner.type === "While" || scope.owner.type === "For" || scope.owner.type === "ForIn" || scope.owner.type === "Repeat")) {
-                        if (target > scope.endPc) {
-                            isBreak = true;
-                        }
-                        break;
-                    }
-                }
-                
-                let currentScope = scopeStack[scopeStack.length - 1];
-                if (currentScope.owner && currentScope.owner.type === "If" && pc === currentScope.endPc - 1) {
-                } else if (isBreak) {
-                    pushNode({ type: "Break" });
-                }
-            }
-        }
-        else if (opname.startsWith("JUMPIF") || opname.startsWith("JUMPXEQ")) {
-            let fwd = sbx >= 0;
-            let cnd;
-            let left = getR(a);
-            let offset = sbx;
-            
-            if (opname.startsWith("JUMPXEQ")) {
-                offset = aux | 0;
-                fwd = offset >= 0;
-                let kn = p.consts[bx] ? formatK(p.consts[bx]) : { type: "Literal", value: "unk" };
-                if (opname === "JUMPXEQKNIL") cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: { type: "Literal", value: "nil" } };
-                else if (opname === "JUMPXEQKB") {
-                    let kb = ((raw >>> 16) & 0xFF) === 1 ? "true" : "false";
-                    cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: { type: "Literal", value: kb } };
-                }
-                else cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: kn };
-            } else {
-                let right = getR(aux & 0xFF);
-                if (opname === "JUMPIF") cnd = fwd ? { type: "UnaryExpression", op: "not", arg: left } : left;
-                else if (opname === "JUMPIFNOT") cnd = fwd ? left : { type: "UnaryExpression", op: "not", arg: left };
-                else if (opname === "JUMPIFEQ") cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: right };
-                else if (opname === "JUMPIFNOTEQ") cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: right };
-                else if (opname === "JUMPIFLE") cnd = { type: "BinaryExpression", op: fwd ? ">" : "<=", left: left, right: right };
-                else if (opname === "JUMPIFNOTLE") cnd = { type: "BinaryExpression", op: fwd ? "<=" : ">", left: left, right: right };
-                else if (opname === "JUMPIFLT") cnd = { type: "BinaryExpression", op: fwd ? ">=" : "<", left: left, right: right };
-                else if (opname === "JUMPIFNOTLT") cnd = { type: "BinaryExpression", op: fwd ? "<" : ">=", left: left, right: right };
-            }
-
-            let target = pc + offset + 1;
-            if (fwd) {
-                let isElse = false;
-                let elseTarget = -1;
-                
-                if (target - 1 >= 0 && target - 1 < p.instrs.length) {
-                    let beforeTargetOp = p.instrs[target - 1] & 0xFF;
-                    let beforeTargetOpName = opcodes[beforeTargetOp];
-                    if (beforeTargetOpName === "JUMP" || beforeTargetOpName === "JUMPX") {
-                        isElse = true;
-                        let jmpRaw = p.instrs[target - 1];
-                        let jmpSbx = (jmpRaw >>> 16) & 0xFFFF;
-                        if (jmpSbx >= 32768) jmpSbx -= 65536;
-                        let jmpOffset = beforeTargetOpName === "JUMPX" ? (p.instrs[target] || 0) : jmpSbx;
-                        elseTarget = (target - 1) + jmpOffset + 1;
-                    }
-                }
-
-                if (isElse) {
-                    let ifBody = [];
-                    let elseBody = [];
-                    let ifNode = { type: "If", cond: cnd, body: { type: "Block", body: ifBody }, elseBody: { type: "Block", body: elseBody } };
-                    pushNode(ifNode);
-                    scopeStack.push({ body: elseBody, endPc: elseTarget, owner: ifNode });
-                    scopeStack.push({ body: ifBody, endPc: target - 1, owner: ifNode });
+        let handleRegAssign = (reg, node, forceEmit = false) => {
+            let name = getNamedLocal(reg, pc);
+            if (name || forceEmit) {
+                let vName = name || `v${reg}`;
+                let idNode = { type: "Identifier", name: vName };
+                let assignNode;
+                if (!definedVars.has(vName)) {
+                    definedVars.add(vName);
+                    assignNode = { type: "LocalAssignment", left: idNode, right: node };
                 } else {
-                    let ifBody = [];
-                    let ifNode = { type: "If", cond: cnd, body: { type: "Block", body: ifBody } };
-                    pushNode(ifNode);
-                    scopeStack.push({ body: ifBody, endPc: target, owner: ifNode });
+                    assignNode = { type: "Assignment", left: idNode, right: node };
                 }
+                regs[reg] = idNode;
+                return assignNode;
             } else {
-                pushNode({ type: "If", cond: { type: "UnaryExpression", op: "not", arg: cnd }, body: { type: "Block", body: [{type: "Break"}] }});
+                regs[reg] = node;
+                return null;
             }
-        }
-        else if (opname === "ADD") setReg(a, { type: "BinaryExpression", op: "+", left: getR(b), right: getR(c) });
-        else if (opname === "SUB") setReg(a, { type: "BinaryExpression", op: "-", left: getR(b), right: getR(c) });
-        else if (opname === "MUL") setReg(a, { type: "BinaryExpression", op: "*", left: getR(b), right: getR(c) });
-        else if (opname === "DIV") setReg(a, { type: "BinaryExpression", op: "/", left: getR(b), right: getR(c) });
-        else if (opname === "MOD") setReg(a, { type: "BinaryExpression", op: "%", left: getR(b), right: getR(c) });
-        else if (opname === "POW") setReg(a, { type: "BinaryExpression", op: "^", left: getR(b), right: getR(c) });
-        else if (opname === "ADDK") setReg(a, { type: "BinaryExpression", op: "+", left: getR(b), right: formatK(p.consts[c]) });
-        else if (opname === "SUBK") setReg(a, { type: "BinaryExpression", op: "-", left: getR(b), right: formatK(p.consts[c]) });
-        else if (opname === "MULK") setReg(a, { type: "BinaryExpression", op: "*", left: getR(b), right: formatK(p.consts[c]) });
-        else if (opname === "DIVK") setReg(a, { type: "BinaryExpression", op: "/", left: getR(b), right: formatK(p.consts[c]) });
-        else if (opname === "MODK") setReg(a, { type: "BinaryExpression", op: "%", left: getR(b), right: formatK(p.consts[c]) });
-        else if (opname === "POWK") setReg(a, { type: "BinaryExpression", op: "^", left: getR(b), right: formatK(p.consts[c]) });
-        else if (opname === "SUBRK") setReg(a, { type: "BinaryExpression", op: "-", left: formatK(p.consts[b]), right: getR(c) });
-        else if (opname === "DIVRK") setReg(a, { type: "BinaryExpression", op: "/", left: formatK(p.consts[b]), right: getR(c) });
-        else if (opname === "IDIV") setReg(a, { type: "Call", isMethod: false, func: { type: "Identifier", name: "math.floor" }, args: [{ type: "BinaryExpression", op: "/", left: getR(b), right: getR(c) }] });
-        else if (opname === "IDIVK") setReg(a, { type: "Call", isMethod: false, func: { type: "Identifier", name: "math.floor" }, args: [{ type: "BinaryExpression", op: "/", left: getR(b), right: formatK(p.consts[c]) }] });
-        else if (opname === "AND") setReg(a, { type: "BinaryExpression", op: "and", left: getR(b), right: getR(c) });
-        else if (opname === "OR") setReg(a, { type: "BinaryExpression", op: "or", left: getR(b), right: getR(c) });
-        else if (opname === "ANDK") setReg(a, { type: "BinaryExpression", op: "and", left: getR(b), right: formatK(p.consts[c]) });
-        else if (opname === "ORK") setReg(a, { type: "BinaryExpression", op: "or", left: getR(b), right: formatK(p.consts[c]) });
-        else if (opname === "NOT") setReg(a, { type: "UnaryExpression", op: "not", arg: getR(b) });
-        else if (opname === "MINUS") setReg(a, { type: "UnaryExpression", op: "-", arg: getR(b) });
-        else if (opname === "LENGTH") setReg(a, { type: "UnaryExpression", op: "#", arg: getR(b) });
-        else if (opname === "CONCAT") {
-            let rArgs = [];
-            for (let i = b; i <= c; i++) rArgs.push(getR(i));
-            setReg(a, { type: "BinaryExpression", op: "..", left: rArgs[0], right: rArgs[1] });
-        }
-        else if (opname === "GETUPVAL") setReg(a, { type: "Identifier", name: p.upvalues[b] || `upval_${b}` });
-        else if (opname === "SETUPVAL") pushNode({ type: "Assignment", left: { type: "Identifier", name: p.upvalues[b] || `upval_${b}` }, right: getR(a) });
-        else if (opname === "NEWCLOSURE" || opname === "DUPCLOSURE") {
-            let protoIdx = opname === "NEWCLOSURE" ? bx : (p.consts[bx] ? p.consts[bx].id : 0);
-            setReg(a, getProtoCode(protoIdx), true);
-        }
-        else if (opname === "NEWTABLE" || opname === "DUPTABLE") {
-            setReg(a, { type: "Table", entries: [] }, false);
-        }
-        else if (opname === "SETLIST") {
-            let count = c - 1;
-            let startIdx = aux; 
-            if (count > 0) {
-                for (let i = 0; i < count; i++) {
-                    if (regs[a] && regs[a].type === "Table") regs[a].entries.push({ key: {type:"Literal", value: startIdx+i}, value: getR(b+i), isBracket: true });
-                    else pushNode({ type: "Assignment", left: { type: "Index", obj: getR(a), prop: { type: "Literal", value: startIdx + i } }, right: getR(b + i) });
+        };
+
+        while (pc < endPc) {
+            if (loopStarts[pc] && pc < loopStarts[pc].tailPc) {
+                let tailPc = loopStarts[pc].tailPc;
+                let loopBody = parseBlock(pc, tailPc);
+                body.push({ type: "While", cond: {type: "Literal", value: "true"}, body: {type: "Block", body: loopBody} });
+                pc = tailPc + getInstrSize(tailPc);
+                continue;
+            }
+
+            let raw = p.instrs[pc];
+            let op = raw & 0xFF;
+            let opname = opcodes[op] || "UNKNOWN";
+            let size = getInstrSize(pc);
+            let a = (raw >>> 8) & 0xFF;
+            let b = (raw >>> 16) & 0xFF;
+            let c = (raw >>> 24) & 0xFF;
+            let bx = (raw >>> 16) & 0xFFFF;
+            let sbx = bx >= 32768 ? bx - 65536 : bx;
+            let aux = size > 1 ? p.instrs[pc + 1] : 0;
+            let auxVal = size > 1 ? p.consts[(aux >>> 0) & 0xFFFFFF] : null;
+
+            if (opname === "NOP" || opname === "COVERAGE" || opname === "CAPTURE" || opname === "PREPVARARGS" || opname.startsWith("FASTCALL")) {
+                pc += size;
+                continue;
+            }
+
+            if (opname === "FORNPREP" || opname.startsWith("FORGPREP")) {
+                let loopTail = pc + sbx + 1;
+                let loopEnd = loopTail + getInstrSize(loopTail);
+                let loopBody = parseBlock(pc + size, loopTail);
+                
+                if (opname === "FORNPREP") {
+                    body.push({ type: "For", vars: getNamedLocal(a+2, pc)||`v${a+2}`, start: getR(a, pc), end: getR(a+1, pc), step: getR(a+2, pc), body: {type: "Block", body: loopBody} });
+                } else {
+                    let iter = null;
+                    if (opname === "FORGPREP_INEXT") iter = "ipairs";
+                    else if (opname === "FORGPREP_NEXT") iter = "pairs";
+
+                    let var1 = getNamedLocal(a+3, pc)||`v${a+3}`;
+                    let var2 = getNamedLocal(a+4, pc)||`v${a+4}`;
+                    body.push({ type: "ForIn", vars: [var1, var2], iterFunc: iter, iters: getR(a, pc), body: {type: "Block", body: loopBody} });
+                }
+                pc = loopEnd;
+                continue;
+            }
+
+            if (opname.startsWith("JUMPIF") || opname.startsWith("JUMPXEQ")) {
+                let offset = sbx;
+                let fwd = sbx >= 0;
+                let cnd;
+                let left = getR(a, pc);
+
+                if (opname.startsWith("JUMPXEQ")) {
+                    offset = aux | 0;
+                    fwd = offset >= 0;
+                    let kn = p.consts[bx] ? formatK(p.consts[bx]) : { type: "Literal", value: "unk" };
+                    if (opname === "JUMPXEQKNIL") cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: { type: "Literal", value: "nil" } };
+                    else if (opname === "JUMPXEQKB") {
+                        let kb = ((raw >>> 16) & 0xFF) === 1 ? "true" : "false";
+                        cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: { type: "Literal", value: kb } };
+                    }
+                    else cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: kn };
+                } else {
+                    let rightR = getR(aux & 0xFF, pc);
+                    if (opname === "JUMPIF") cnd = fwd ? { type: "UnaryExpression", op: "not", arg: left } : left;
+                    else if (opname === "JUMPIFNOT") cnd = fwd ? left : { type: "UnaryExpression", op: "not", arg: left };
+                    else if (opname === "JUMPIFEQ") cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: rightR };
+                    else if (opname === "JUMPIFNOTEQ") cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: rightR };
+                    else if (opname === "JUMPIFLE") cnd = { type: "BinaryExpression", op: fwd ? ">" : "<=", left: left, right: rightR };
+                    else if (opname === "JUMPIFNOTLE") cnd = { type: "BinaryExpression", op: fwd ? "<=" : ">", left: left, right: rightR };
+                    else if (opname === "JUMPIFLT") cnd = { type: "BinaryExpression", op: fwd ? ">=" : "<", left: left, right: rightR };
+                    else if (opname === "JUMPIFNOTLT") cnd = { type: "BinaryExpression", op: fwd ? "<" : ">=", left: left, right: rightR };
+                }
+
+                let target = pc + offset + 1;
+
+                if (!fwd || target > endPc) {
+                    body.push({ type: "If", cond: {type:"UnaryExpression", op:"not", arg:cnd}, body: {type: "Block", body: [{type: "Break"}]} });
+                    pc += size;
+                    continue;
+                }
+
+                let prevPc = pc;
+                let curr = pc + size;
+                while (curr < target) {
+                    prevPc = curr;
+                    curr += getInstrSize(curr);
+                }
+
+                let hasElse = false;
+                let elseTarget = target;
+                let trueEnd = target;
+
+                if (prevPc < target && (getOp(prevPc) === "JUMP" || getOp(prevPc) === "JUMPX")) {
+                    let prevOp = getOp(prevPc);
+                    let jmpOffset = prevOp === "JUMPX" ? (p.instrs[prevPc] >> 8) : (p.instrs[prevPc] >>> 16) & 0xFFFF;
+                    if (prevOp !== "JUMPX" && jmpOffset >= 32768) jmpOffset -= 65536;
+                    
+                    let candElseTarget = prevPc + jmpOffset + 1;
+                    if (candElseTarget > target && candElseTarget <= endPc) {
+                        hasElse = true;
+                        trueEnd = prevPc;
+                        elseTarget = candElseTarget;
+                    }
+                }
+
+                let trueBody = parseBlock(pc + size, trueEnd);
+                if (hasElse) {
+                    let elseBody = parseBlock(target, elseTarget);
+                    body.push({ type: "If", cond: cnd, body: {type:"Block", body:trueBody}, elseBody: {type:"Block", body:elseBody} });
+                    pc = elseTarget;
+                } else {
+                    body.push({ type: "If", cond: cnd, body: {type:"Block", body:trueBody} });
+                    pc = target;
+                }
+                continue;
+            }
+
+            if (opname === "JUMP" || opname === "JUMPX") {
+                let offset = opname === "JUMPX" ? (raw >> 8) : sbx;
+                let target = pc + offset + 1;
+                if (target > endPc) {
+                    body.push({ type: "Break" });
+                }
+                pc += size;
+                continue;
+            }
+
+            let assignNode = null;
+            if (opname === "LOADNIL") assignNode = handleRegAssign(a, { type: "Literal", value: "nil" });
+            else if (opname === "LOADB") assignNode = handleRegAssign(a, { type: "Literal", value: b === 1 ? "true" : "false" });
+            else if (opname === "LOADN") assignNode = handleRegAssign(a, { type: "Literal", value: sbx });
+            else if (opname === "LOADK") assignNode = handleRegAssign(a, formatK(p.consts[bx]));
+            else if (opname === "LOADKX") assignNode = handleRegAssign(a, formatK(auxVal));
+            else if (opname === "MOVE") assignNode = handleRegAssign(a, getR(b, pc));
+            else if (opname === "GETGLOBAL") assignNode = handleRegAssign(a, { type: "Identifier", name: formatKVal(auxVal) }, true);
+            else if (opname === "SETGLOBAL") body.push({ type: "Assignment", left: { type: "Identifier", name: formatKVal(auxVal) }, right: getR(a, pc) });
+            else if (opname === "GETIMPORT") assignNode = handleRegAssign(a, { type: "Identifier", name: formatKVal(auxVal) }, true);
+            else if (opname === "GETTABLE") assignNode = handleRegAssign(a, { type: "Index", obj: getR(b, pc), prop: getR(c, pc) });
+            else if (opname === "GETTABLEKS") assignNode = handleRegAssign(a, { type: "IndexProp", obj: getR(b, pc), prop: formatKVal(auxVal) });
+            else if (opname === "GETTABLEN") assignNode = handleRegAssign(a, { type: "Index", obj: getR(b, pc), prop: { type: "Literal", value: c + 1 } });
+            else if (opname === "SETTABLE") {
+                if (regs[b] && regs[b].type === "Table") regs[b].entries.push({ key: getR(c, pc), value: getR(a, pc), isBracket: true });
+                else body.push({ type: "Assignment", left: { type: "Index", obj: getR(b, pc), prop: getR(c, pc) }, right: getR(a, pc) });
+            }
+            else if (opname === "SETTABLEKS") {
+                if (regs[b] && regs[b].type === "Table") regs[b].entries.push({ key: formatKVal(auxVal), value: getR(a, pc), isBracket: false });
+                else body.push({ type: "Assignment", left: { type: "IndexProp", obj: getR(b, pc), prop: formatKVal(auxVal) }, right: getR(a, pc) });
+            }
+            else if (opname === "SETTABLEN") {
+                if (regs[b] && regs[b].type === "Table") regs[b].entries.push({ key: {type:"Literal", value:c+1}, value: getR(a, pc), isBracket: true });
+                else body.push({ type: "Assignment", left: { type: "Index", obj: getR(b, pc), prop: { type: "Literal", value: c + 1 } }, right: getR(a, pc) });
+            }
+            else if (opname === "NAMECALL") {
+                namecalls[a] = { obj: getR(b, pc), func: formatKVal(auxVal) };
+                regs[a + 1] = getR(b, pc);
+            }
+            else if (opname === "CALL") {
+                let nc = namecalls[a];
+                let args = [];
+                if (b === 0) args.push({ type: "Vararg" });
+                else {
+                    let startIdx = nc ? 2 : 1;
+                    for (let j = startIdx; j <= b - 1; j++) args.push(getR(a + j, pc));
+                }
+                
+                let callNode = nc ? { type: "Call", isMethod: true, func: nc, args: args } : { type: "Call", isMethod: false, func: getR(a, pc), args: args };
+                if (nc) delete namecalls[a];
+                
+                if (c - 1 === 0) {
+                    body.push({ type: "CallStatement", call: callNode }); 
+                } else if (c - 1 === 1) {
+                    assignNode = handleRegAssign(a, callNode, true);
+                } else {
+                    let leftVars = [];
+                    for (let j = 0; j < c - 1; j++) {
+                        let n = getNamedLocal(a + j, pc) || `v${a + j}`;
+                        leftVars.push({ type: "Identifier", name: n });
+                        regs[a + j] = leftVars[j];
+                        definedVars.add(n);
+                    }
+                    body.push({ type: "MultiAssignment", left: leftVars, right: callNode });
                 }
             }
-        }
-        else if (opname === "GETVARARGS") setReg(a, { type: "Vararg" });
-        else if (opname === "FORNPREP") {
-            let loopVar = getNamedLocal(a + 2, pc) || `v${a + 2}`;
-            let forBody = [];
-            let target = pc + sbx + 1;
-            let forNode = { type: "For", vars: loopVar, start: getR(a), end: getR(a+1), step: getR(a+2), body: { type: "Block", body: forBody } };
-            pushNode(forNode);
-            scopeStack.push({ body: forBody, endPc: target, owner: forNode });
-        }
-        else if (opname.startsWith("FORGPREP")) {
-            let var1 = getNamedLocal(a + 3, pc) || `v${a + 3}`;
-            let var2 = getNamedLocal(a + 4, pc) || `v${a + 4}`;
-            let forBody = [];
-            let target = pc + sbx + 1;
-            let forNode = { type: "ForIn", vars: [var1, var2], iters: getR(a), body: { type: "Block", body: forBody } };
-            pushNode(forNode);
-            scopeStack.push({ body: forBody, endPc: target, owner: forNode });
+            else if (opname === "RETURN") {
+                let rArgs = [];
+                if (b > 1) {
+                    for (let j = 0; j < b - 1; j++) rArgs.push(getR(a + j, pc));
+                } else if (b === 0) rArgs.push({ type: "Vararg" });
+                body.push({ type: "Return", args: rArgs });
+            }
+            else if (opname === "ADD") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "+", left: getR(b, pc), right: getR(c, pc) });
+            else if (opname === "SUB") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "-", left: getR(b, pc), right: getR(c, pc) });
+            else if (opname === "MUL") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "*", left: getR(b, pc), right: getR(c, pc) });
+            else if (opname === "DIV") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "/", left: getR(b, pc), right: getR(c, pc) });
+            else if (opname === "MOD") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "%", left: getR(b, pc), right: getR(c, pc) });
+            else if (opname === "POW") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "^", left: getR(b, pc), right: getR(c, pc) });
+            else if (opname === "ADDK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "+", left: getR(b, pc), right: formatK(p.consts[c]) });
+            else if (opname === "SUBK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "-", left: getR(b, pc), right: formatK(p.consts[c]) });
+            else if (opname === "MULK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "*", left: getR(b, pc), right: formatK(p.consts[c]) });
+            else if (opname === "DIVK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "/", left: getR(b, pc), right: formatK(p.consts[c]) });
+            else if (opname === "MODK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "%", left: getR(b, pc), right: formatK(p.consts[c]) });
+            else if (opname === "POWK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "^", left: getR(b, pc), right: formatK(p.consts[c]) });
+            else if (opname === "SUBRK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "-", left: formatK(p.consts[b]), right: getR(c, pc) });
+            else if (opname === "DIVRK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "/", left: formatK(p.consts[b]), right: getR(c, pc) });
+            else if (opname === "IDIV") assignNode = handleRegAssign(a, { type: "Call", isMethod: false, func: { type: "Identifier", name: "math.floor" }, args: [{ type: "BinaryExpression", op: "/", left: getR(b, pc), right: getR(c, pc) }] });
+            else if (opname === "IDIVK") assignNode = handleRegAssign(a, { type: "Call", isMethod: false, func: { type: "Identifier", name: "math.floor" }, args: [{ type: "BinaryExpression", op: "/", left: getR(b, pc), right: formatK(p.consts[c]) }] });
+            else if (opname === "AND") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "and", left: getR(b, pc), right: getR(c, pc) });
+            else if (opname === "OR") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "or", left: getR(b, pc), right: getR(c, pc) });
+            else if (opname === "ANDK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "and", left: getR(b, pc), right: formatK(p.consts[c]) });
+            else if (opname === "ORK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "or", left: getR(b, pc), right: formatK(p.consts[c]) });
+            else if (opname === "NOT") assignNode = handleRegAssign(a, { type: "UnaryExpression", op: "not", arg: getR(b, pc) });
+            else if (opname === "MINUS") assignNode = handleRegAssign(a, { type: "UnaryExpression", op: "-", arg: getR(b, pc) });
+            else if (opname === "LENGTH") assignNode = handleRegAssign(a, { type: "UnaryExpression", op: "#", arg: getR(b, pc) });
+            else if (opname === "CONCAT") {
+                let rArgs = [];
+                for (let j = b; j <= c; j++) rArgs.push(getR(j, pc));
+                assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "..", left: rArgs[0], right: rArgs[1] });
+            }
+            else if (opname === "GETUPVAL") assignNode = handleRegAssign(a, { type: "Identifier", name: p.upvalues[b] || `upval_${b}` });
+            else if (opname === "SETUPVAL") body.push({ type: "Assignment", left: { type: "Identifier", name: p.upvalues[b] || `upval_${b}` }, right: getR(a, pc) });
+            else if (opname === "NEWCLOSURE" || opname === "DUPCLOSURE") {
+                let pIdx = opname === "NEWCLOSURE" ? bx : (p.consts[bx] ? p.consts[bx].id : 0);
+                assignNode = handleRegAssign(a, getProtoCode(pIdx), true);
+            }
+            else if (opname === "NEWTABLE" || opname === "DUPTABLE") {
+                assignNode = handleRegAssign(a, { type: "Table", entries: [] }, false);
+            }
+            else if (opname === "GETVARARGS") assignNode = handleRegAssign(a, { type: "Vararg" });
+
+            if (assignNode) body.push(assignNode);
+            
+            pc += size;
         }
 
-        pc++;
-        if (hasAux) pc++;
+        function getOp(p_c) { return opcodes[p.instrs[p_c] & 0xFF] || "UNKNOWN"; }
+        return body;
     }
-    
-    return { type: "Block", body: astBody };
+
+    return { type: "Block", body: parseBlock(0, p.instrs.length) };
 }
 
 function process(base64str) {
