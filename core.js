@@ -2,7 +2,7 @@ const bufferreader = require('./reader');
 const opcodes = require('./opcodes');
 
 const layouts = [];
-const permute = (arr, m = []) => {
+const permute = (arr, m =[]) => {
     if (arr.length === 0) layouts.push(m);
     else for (let i = 0; i < arr.length; i++) {
         let curr = arr.slice();
@@ -33,10 +33,11 @@ function formatKVal(k) {
 
 function formatK(k) {
     if (!k) return { type: "Literal", value: "nil" };
-    if (k.t === 'str') return { type: "Literal", value: `"${k.v.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"` };
+    let vStr = typeof k.v === 'string' ? k.v.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\n/g, "\\n").replace(/\r/g, "\\r") : k.v;
+    if (k.t === 'str') return { type: "Literal", value: `"${vStr}"` };
     if (k.t === 'bool') return { type: "Literal", value: k.v ? "true" : "false" };
     if (k.t === 'closure') return { type: "Literal", value: `closure_${k.id}` };
-    if (k.t === 'table') return { type: "Table", entries: [] };
+    if (k.t === 'table') return { type: "Table", entries:[] };
     if (k.t === 'import') return { type: "Identifier", name: k.v };
     if (k.t === 'num') return { type: "Literal", value: k.v };
     return { type: "Literal", value: k.v !== undefined ? k.v : "nil" };
@@ -63,10 +64,10 @@ function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, u
         }
         
         let p_instrs = [];
-        let p_consts = [];
+        let p_consts =[];
         let p_protos = [];
         let p_locvars = [];
-        let p_upvalues = [];
+        let p_upvalues =[];
         let p_protoname = "anonymous";
 
         for (let block of layout) {
@@ -90,7 +91,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, u
                     else if (type === 4) {
                         let id = r.readuint32();
                         let count = id >>> 30;
-                        let arr = [];
+                        let arr =[];
                         let getval = (idx) => { 
                             let c = p_consts[idx]; 
                             if (!c) return `unk_${idx}`;
@@ -299,7 +300,7 @@ function stringifyAST(node, ind) {
 }
 
 function lift(p, allprotos, getProtoCode) {
-    if (!p || !p.instrs || p.instrs.length === 0) return { type: "Block", body: [] };
+    if (!p || !p.instrs || p.instrs.length === 0) return { type: "Block", body:[] };
 
     let definedVars = new Set();
     let namecalls = {};
@@ -316,7 +317,6 @@ function lift(p, allprotos, getProtoCode) {
         let op = p.instrs[i] & 0xFF;
         let opname = opcodes[op] || "UNKNOWN";
         let bx = (p.instrs[i] >>> 16) & 0xFFFF;
-        let sbx = bx >= 32768 ? bx - 65536 : bx;
         
         if (opname === "JUMPBACK") {
             let targetPc = i - bx + 1;
@@ -342,7 +342,7 @@ function lift(p, allprotos, getProtoCode) {
     let getR = (r, currentPc) => regs[r] || { type: "Identifier", name: getNamedLocal(r, currentPc) || `v${r}` };
 
     function parseBlock(startPc, endPc) {
-        let body = [];
+        let body =[];
         let pc = startPc;
 
         let handleRegAssign = (reg, node, forceEmit = false) => {
@@ -414,7 +414,7 @@ function lift(p, allprotos, getProtoCode) {
             if (opname.startsWith("JUMPIF") || opname.startsWith("JUMPXEQ")) {
                 let offset = sbx;
                 let fwd = sbx >= 0;
-                let cnd;
+                let cnd = { type: "Literal", value: "true" };
                 let left = getR(a, pc);
 
                 if (opname.startsWith("JUMPXEQ")) {
@@ -442,7 +442,7 @@ function lift(p, allprotos, getProtoCode) {
                 let target = pc + offset + 1;
 
                 if (!fwd || target > endPc) {
-                    body.push({ type: "If", cond: {type:"UnaryExpression", op:"not", arg:cnd}, body: {type: "Block", body: [{type: "Break"}]} });
+                    body.push({ type: "If", cond: {type:"UnaryExpression", op:"not", arg:cnd}, body: {type: "Block", body:[{type: "Break"}]} });
                     pc += size;
                     continue;
                 }
@@ -500,12 +500,15 @@ function lift(p, allprotos, getProtoCode) {
             else if (opname === "LOADK") assignNode = handleRegAssign(a, formatK(p.consts[bx]));
             else if (opname === "LOADKX") assignNode = handleRegAssign(a, formatK(auxVal));
             else if (opname === "MOVE") assignNode = handleRegAssign(a, getR(b, pc));
-            else if (opname === "GETGLOBAL") assignNode = handleRegAssign(a, { type: "Identifier", name: formatKVal(auxVal) }, true);
+            
+            else if (opname === "GETGLOBAL") assignNode = handleRegAssign(a, { type: "Identifier", name: formatKVal(auxVal) }, false);
             else if (opname === "SETGLOBAL") body.push({ type: "Assignment", left: { type: "Identifier", name: formatKVal(auxVal) }, right: getR(a, pc) });
-            else if (opname === "GETIMPORT") assignNode = handleRegAssign(a, { type: "Identifier", name: formatKVal(auxVal) }, true);
-            else if (opname === "GETTABLE") assignNode = handleRegAssign(a, { type: "Index", obj: getR(b, pc), prop: getR(c, pc) });
-            else if (opname === "GETTABLEKS") assignNode = handleRegAssign(a, { type: "IndexProp", obj: getR(b, pc), prop: formatKVal(auxVal) });
-            else if (opname === "GETTABLEN") assignNode = handleRegAssign(a, { type: "Index", obj: getR(b, pc), prop: { type: "Literal", value: c + 1 } });
+            else if (opname === "GETIMPORT") assignNode = handleRegAssign(a, { type: "Identifier", name: formatKVal(auxVal) }, false);
+            
+            else if (opname === "GETTABLE") assignNode = handleRegAssign(a, { type: "Index", obj: getR(b, pc), prop: getR(c, pc) }, false);
+            else if (opname === "GETTABLEKS") assignNode = handleRegAssign(a, { type: "IndexProp", obj: getR(b, pc), prop: formatKVal(auxVal) }, false);
+            else if (opname === "GETTABLEN") assignNode = handleRegAssign(a, { type: "Index", obj: getR(b, pc), prop: { type: "Literal", value: c + 1 } }, false);
+            
             else if (opname === "SETTABLE") {
                 if (regs[b] && regs[b].type === "Table") regs[b].entries.push({ key: getR(c, pc), value: getR(a, pc), isBracket: true });
                 else body.push({ type: "Assignment", left: { type: "Index", obj: getR(b, pc), prop: getR(c, pc) }, right: getR(a, pc) });
@@ -524,7 +527,7 @@ function lift(p, allprotos, getProtoCode) {
             }
             else if (opname === "CALL") {
                 let nc = namecalls[a];
-                let args = [];
+                let args =[];
                 if (b === 0) args.push({ type: "Vararg" });
                 else {
                     let startIdx = nc ? 2 : 1;
@@ -534,12 +537,12 @@ function lift(p, allprotos, getProtoCode) {
                 let callNode = nc ? { type: "Call", isMethod: true, func: nc, args: args } : { type: "Call", isMethod: false, func: getR(a, pc), args: args };
                 if (nc) delete namecalls[a];
                 
-                if (c - 1 === 0) {
+                if (c - 1 === 0 || c === 0) {
                     body.push({ type: "CallStatement", call: callNode }); 
                 } else if (c - 1 === 1) {
                     assignNode = handleRegAssign(a, callNode, true);
                 } else {
-                    let leftVars = [];
+                    let leftVars =[];
                     for (let j = 0; j < c - 1; j++) {
                         let n = getNamedLocal(a + j, pc) || `v${a + j}`;
                         leftVars.push({ type: "Identifier", name: n });
@@ -550,7 +553,7 @@ function lift(p, allprotos, getProtoCode) {
                 }
             }
             else if (opname === "RETURN") {
-                let rArgs = [];
+                let rArgs =[];
                 if (b > 1) {
                     for (let j = 0; j < b - 1; j++) rArgs.push(getR(a + j, pc));
                 } else if (b === 0) rArgs.push({ type: "Vararg" });
@@ -570,8 +573,8 @@ function lift(p, allprotos, getProtoCode) {
             else if (opname === "POWK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "^", left: getR(b, pc), right: formatK(p.consts[c]) });
             else if (opname === "SUBRK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "-", left: formatK(p.consts[b]), right: getR(c, pc) });
             else if (opname === "DIVRK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "/", left: formatK(p.consts[b]), right: getR(c, pc) });
-            else if (opname === "IDIV") assignNode = handleRegAssign(a, { type: "Call", isMethod: false, func: { type: "Identifier", name: "math.floor" }, args: [{ type: "BinaryExpression", op: "/", left: getR(b, pc), right: getR(c, pc) }] });
-            else if (opname === "IDIVK") assignNode = handleRegAssign(a, { type: "Call", isMethod: false, func: { type: "Identifier", name: "math.floor" }, args: [{ type: "BinaryExpression", op: "/", left: getR(b, pc), right: formatK(p.consts[c]) }] });
+            else if (opname === "IDIV") assignNode = handleRegAssign(a, { type: "Call", isMethod: false, func: { type: "Identifier", name: "math.floor" }, args:[{ type: "BinaryExpression", op: "/", left: getR(b, pc), right: getR(c, pc) }] });
+            else if (opname === "IDIVK") assignNode = handleRegAssign(a, { type: "Call", isMethod: false, func: { type: "Identifier", name: "math.floor" }, args:[{ type: "BinaryExpression", op: "/", left: getR(b, pc), right: formatK(p.consts[c]) }] });
             else if (opname === "AND") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "and", left: getR(b, pc), right: getR(c, pc) });
             else if (opname === "OR") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "or", left: getR(b, pc), right: getR(c, pc) });
             else if (opname === "ANDK") assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "and", left: getR(b, pc), right: formatK(p.consts[c]) });
@@ -580,18 +583,31 @@ function lift(p, allprotos, getProtoCode) {
             else if (opname === "MINUS") assignNode = handleRegAssign(a, { type: "UnaryExpression", op: "-", arg: getR(b, pc) });
             else if (opname === "LENGTH") assignNode = handleRegAssign(a, { type: "UnaryExpression", op: "#", arg: getR(b, pc) });
             else if (opname === "CONCAT") {
-                let rArgs = [];
+                let rArgs =[];
                 for (let j = b; j <= c; j++) rArgs.push(getR(j, pc));
-                assignNode = handleRegAssign(a, { type: "BinaryExpression", op: "..", left: rArgs[0], right: rArgs[1] });
+                let concatNode = rArgs[0];
+                for(let j = 1; j < rArgs.length; j++) {
+                    concatNode = { type: "BinaryExpression", op: "..", left: concatNode, right: rArgs[j] };
+                }
+                assignNode = handleRegAssign(a, concatNode, false);
             }
-            else if (opname === "GETUPVAL") assignNode = handleRegAssign(a, { type: "Identifier", name: p.upvalues[b] || `upval_${b}` });
+            else if (opname === "GETUPVAL") assignNode = handleRegAssign(a, { type: "Identifier", name: p.upvalues[b] || `upval_${b}` }, false);
             else if (opname === "SETUPVAL") body.push({ type: "Assignment", left: { type: "Identifier", name: p.upvalues[b] || `upval_${b}` }, right: getR(a, pc) });
+            
             else if (opname === "NEWCLOSURE" || opname === "DUPCLOSURE") {
                 let pIdx = opname === "NEWCLOSURE" ? bx : (p.consts[bx] ? p.consts[bx].id : 0);
-                assignNode = handleRegAssign(a, getProtoCode(pIdx), true);
+                assignNode = handleRegAssign(a, getProtoCode(pIdx), false);
             }
             else if (opname === "NEWTABLE" || opname === "DUPTABLE") {
-                assignNode = handleRegAssign(a, { type: "Table", entries: [] }, false);
+                assignNode = handleRegAssign(a, { type: "Table", entries:[] }, false);
+            }
+            else if (opname === "SETLIST") {
+                let tableNode = regs[a];
+                if (tableNode && tableNode.type === "Table") {
+                    for (let j = 1; j <= b; j++) {
+                        tableNode.entries.push({ key: { type: "Literal", value: c + j }, value: getR(a + j, pc), isBracket: true });
+                    }
+                }
             }
             else if (opname === "GETVARARGS") assignNode = handleRegAssign(a, { type: "Vararg" });
 
@@ -629,12 +645,12 @@ function process(base64str) {
         };
 
         let version = r.readbyte();
-        if (version < 3 || version > 7) return "";
+        if (version < 3 || version > 7) return "-- [DECOMPILER ERROR] Unsupported bytecode version: " + version;
         
         let savedGlobalOffset = r.offset;
-        let globalActionFlagOptions = (version >= 4) ? [true, false] : [false];
+        let globalActionFlagOptions = (version >= 4) ?[true, false] : [false];
         
-        let structuralOptions = [
+        let structuralOptions =[
             { typeinfo: false, upvalues: false },
             { typeinfo: false, upvalues: true },
             { typeinfo: true,  upvalues: false },
@@ -642,7 +658,7 @@ function process(base64str) {
         ];
 
         let found = false;
-        let allprotos = [];
+        let allprotos =[];
         let mainindex = 0;
 
         for (let useGlobalActionFlag of globalActionFlagOptions) {
@@ -653,7 +669,7 @@ function process(base64str) {
                 let stringcount = r.readvarint();
                 if (stringcount > 100000) continue; 
 
-                let strings = [];
+                let strings =[];
                 for (let i = 0; i < stringcount; i++) {
                     let slen = r.readvarint();
                     strings.push(r.readstring(slen));
@@ -682,10 +698,10 @@ function process(base64str) {
                             
                             try {
                                 let protocount = r.readvarint();
-                                let tempProtos = [];
+                                let tempProtos =[];
                                 let pSuccess = true;
                                 for (let i = 0; i < protocount; i++) {
-                                    let p = parseproto(r, strings, version, i, [], layout, opt.typeinfo, opt.upvalues);
+                                    let p = parseproto(r, strings, version, i,[], layout, opt.typeinfo, opt.upvalues);
                                     if (!p.success) {
                                         pSuccess = false;
                                         break;
@@ -716,18 +732,18 @@ function process(base64str) {
         }
 
         if (!found) {
-            return "-- [DECOMPILER ERROR] Invalid main proto index or failed to determine bytecode structure.";
+            return "--[DECOMPILER ERROR] Invalid main proto index or failed to determine bytecode structure.";
         }
         
         let activeProtos = new Set();
         let getProtoCode = (pIdx) => {
             let cp = allprotos[pIdx];
-            if (!cp || activeProtos.has(pIdx)) return { type: "Function", args: [], body: { type: "Block", body: [] } };
+            if (!cp || activeProtos.has(pIdx)) return { type: "Function", args: [], body: { type: "Block", body:[] } };
             if (cp.astNode) return cp.astNode;
             
             activeProtos.add(pIdx);
             
-            let args = [];
+            let args =[];
             for (let a = 0; a < cp.numparams; a++) {
                 let name = `v${a}`;
                 if (cp.locvars) {
@@ -748,10 +764,10 @@ function process(base64str) {
         let finalAST = lift(allprotos[mainindex], allprotos, getProtoCode);
         finalAST = optimizeAST(finalAST);
         let finalCode = stringifyAST(finalAST, 0);
-        return finalCode.length > 0 ? finalCode : "";
+        return finalCode.length > 0 ? finalCode : "-- [DECOMPILER MSG] Decompiled successfully, but the output was empty.";
 
     } catch (e) {
-        return "";
+        return `-- [DECOMPILER CRASH]\n-- ${e.message}\n-- ${e.stack.split('\n').join('\n-- ')}`;
     }
 }
 
