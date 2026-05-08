@@ -1,7 +1,7 @@
 const bufferreader = require('./reader');
 const opcodes = require('./opcodes');
 
-const layouts = [];
+const layouts =[];
 const permute = (arr, m =[]) => {
     if (arr.length === 0) layouts.push(m);
     else for (let i = 0; i < arr.length; i++) {
@@ -16,8 +16,7 @@ const aux_opcodes = new Set([
     "GETGLOBAL", "SETGLOBAL", "GETIMPORT", "GETTABLEKS", "SETTABLEKS", "NAMECALL",
     "JUMPIFEQ", "JUMPIFNOTEQ", "JUMPIFLE", "JUMPIFNOTLE", "JUMPIFLT", "JUMPIFNOTLT",
     "JUMPXEQKNIL", "JUMPXEQKB", "JUMPXEQKN", "JUMPXEQKS",
-    "FORGLOOP", "LOADKX", "SETLIST", "NEWTABLE", "DUPTABLE", "JUMPX",
-    "FASTCALL1", "FASTCALL2", "FASTCALL2K", "FASTCALL3"
+    "FORGLOOP", "LOADKX", "SETLIST", "NEWTABLE", "DUPTABLE"
 ]);
 
 function formatKVal(k) {
@@ -64,9 +63,9 @@ function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, u
         }
         
         let p_instrs =[];
-        let p_consts = [];
-        let p_protos =[];
-        let p_locvars = [];
+        let p_consts =[];
+        let p_protos = [];
+        let p_locvars =[];
         let p_upvalues =[];
         let p_protoname = "anonymous";
 
@@ -91,7 +90,7 @@ function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, u
                     else if (type === 4) {
                         let id = r.readuint32();
                         let count = id >>> 30;
-                        let arr = [];
+                        let arr =[];
                         let getval = (idx) => { 
                             let c = p_consts[idx]; 
                             if (!c) return `unk_${idx}`;
@@ -259,7 +258,11 @@ function stringifyAST(node, ind) {
         case "Identifier": return node.name;
         case "Literal": return node.value;
         case "BinaryExpression": return `${stringifyAST(node.left, 0)} ${node.op} ${stringifyAST(node.right, 0)}`;
-        case "UnaryExpression": return `${node.op}${node.op === "not" ? " " : ""}${stringifyAST(node.arg, 0)}`;
+        case "UnaryExpression": 
+            if (node.op === "not" && node.arg.type === "BinaryExpression") {
+                return `not (${stringifyAST(node.arg, 0)})`;
+            }
+            return `${node.op}${node.op === "not" ? " " : ""}${stringifyAST(node.arg, 0)}`;
         case "Function": return `function(${node.args.join(", ")})\n${stringifyAST(node.body, ind+1)}\n${p}end`;
         case "Vararg": return "...";
         case "Group": return `(${stringifyAST(node.exp, 0)})`;
@@ -362,24 +365,24 @@ function lift(p, allprotos, getProtoCode) {
 
                 if (opname.startsWith("JUMPXEQ")) {
                     if (opname === "JUMPXEQKNIL") {
-                        cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: { type: "Literal", value: "nil" } };
+                        cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: { type: "Literal", value: "nil" } };
                     } else if (opname === "JUMPXEQKB") {
                         let kb = (aux & 1) === 1 ? "true" : "false";
-                        cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: { type: "Literal", value: kb } };
+                        cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: { type: "Literal", value: kb } };
                     } else {
                         let kn = p.consts[aux & 0xFFFFFF] ? formatK(p.consts[aux & 0xFFFFFF]) : { type: "Literal", value: "unk" };
-                        cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: kn };
+                        cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: kn };
                     }
                 } else {
                     let rightR = getR(aux & 0xFF, pc);
-                    if (opname === "JUMPIF") cnd = fwd ? left : { type: "UnaryExpression", op: "not", arg: left };
-                    else if (opname === "JUMPIFNOT") cnd = fwd ? { type: "UnaryExpression", op: "not", arg: left } : left;
-                    else if (opname === "JUMPIFEQ") cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: rightR };
-                    else if (opname === "JUMPIFNOTEQ") cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: rightR };
-                    else if (opname === "JUMPIFLE") cnd = { type: "BinaryExpression", op: fwd ? "<=" : ">", left: left, right: rightR };
-                    else if (opname === "JUMPIFNOTLE") cnd = { type: "BinaryExpression", op: fwd ? ">" : "<=", left: left, right: rightR };
-                    else if (opname === "JUMPIFLT") cnd = { type: "BinaryExpression", op: fwd ? "<" : ">=", left: left, right: rightR };
-                    else if (opname === "JUMPIFNOTLT") cnd = { type: "BinaryExpression", op: fwd ? ">=" : "<", left: left, right: rightR };
+                    if (opname === "JUMPIF") cnd = fwd ? { type: "UnaryExpression", op: "not", arg: left } : left;
+                    else if (opname === "JUMPIFNOT") cnd = fwd ? left : { type: "UnaryExpression", op: "not", arg: left };
+                    else if (opname === "JUMPIFEQ") cnd = { type: "BinaryExpression", op: fwd ? "~=" : "==", left: left, right: rightR };
+                    else if (opname === "JUMPIFNOTEQ") cnd = { type: "BinaryExpression", op: fwd ? "==" : "~=", left: left, right: rightR };
+                    else if (opname === "JUMPIFLE") cnd = { type: "BinaryExpression", op: fwd ? ">" : "<=", left: left, right: rightR };
+                    else if (opname === "JUMPIFNOTLE") cnd = { type: "BinaryExpression", op: fwd ? "<=" : ">", left: left, right: rightR };
+                    else if (opname === "JUMPIFLT") cnd = { type: "BinaryExpression", op: fwd ? ">=" : "<", left: left, right: rightR };
+                    else if (opname === "JUMPIFNOTLT") cnd = { type: "BinaryExpression", op: fwd ? "<" : ">=", left: left, right: rightR };
                 }
 
                 let target = pc + offset + 1;
@@ -466,7 +469,7 @@ function lift(p, allprotos, getProtoCode) {
                 if (b === 0) args.push({ type: "Vararg" });
                 else {
                     let numArgs = nc ? b - 2 : b - 1;
-                    for (let j = 0; j <= numArgs; j++) args.push(getR(startIdx + j, pc));
+                    for (let j = 0; j < numArgs; j++) args.push(getR(startIdx + j, pc));
                     args = args.filter(x => x !== undefined);
                 }
                 
@@ -569,6 +572,7 @@ function lift(p, allprotos, getProtoCode) {
 }
 
 function process(base64str) {
+    let debugLog =[];
     try {
         let buf = Buffer.from(base64str, 'base64');
         let r = new bufferreader(buf);
@@ -590,7 +594,9 @@ function process(base64str) {
         };
 
         let version = r.readbyte();
-        if (version < 3 || version > 7) return "";
+        if (version < 3 || version > 7) {
+            return `-- [MEGGD ENGINE DEBUG]\n-- Unsupported Luau bytecode version: ${version}`;
+        }
         
         let savedGlobalOffset = r.offset;
         let globalActionFlagOptions = (version >= 4) ? [true, false] : [false];
@@ -617,6 +623,7 @@ function process(base64str) {
                 let strings =[];
                 for (let i = 0; i < stringcount; i++) {
                     let slen = r.readvarint();
+                    if (slen > r.length) break;
                     strings.push(r.readstring(slen));
                 }
                 
@@ -634,6 +641,7 @@ function process(base64str) {
                             try {
                                 for(let k = 0; k < extraStrings; k++) {
                                     let slen = r.readvarint();
+                                    if (slen > r.length) throw new Error("String bound");
                                     strings.push(r.readstring(slen));
                                 }
                             } catch(e) {
@@ -645,10 +653,13 @@ function process(base64str) {
                                 let protocount = r.readvarint();
                                 let tempProtos =[];
                                 let pSuccess = true;
+                                let protoErrors =[];
+                                
                                 for (let i = 0; i < protocount; i++) {
                                     let p = parseproto(r, strings, version, i,[], layout, opt.typeinfo, opt.upvalues);
                                     if (!p.success) {
                                         pSuccess = false;
+                                        protoErrors.push(`Proto ${i} error: ${p.error}`);
                                         break;
                                     }
                                     tempProtos.push(p);
@@ -663,8 +674,14 @@ function process(base64str) {
                                             mainindex = mIdx;
                                             found = true;
                                             break;
+                                        } else {
+                                            debugLog.push(`Potential match found, but first opcode ${firstOp} is unknown.`);
                                         }
+                                    } else {
+                                        debugLog.push(`Main proto index out of bounds: ${mIdx}`);
                                     }
+                                } else {
+                                    debugLog.push(`[${layout.join(',')}] extra: ${extraStrings} | ${protoErrors[0]}`);
                                 }
                             } catch (e) {}
                         }
@@ -677,13 +694,13 @@ function process(base64str) {
         }
 
         if (!found) {
-            return "";
+            return `--[MEGGD ENGINE DEBUG]\n-- Failed to match bytecode structure.\n-- ` + debugLog.slice(-10).join('\n-- ');
         }
         
         let activeProtos = new Set();
         let getProtoCode = (pIdx) => {
             let cp = allprotos[pIdx];
-            if (!cp || activeProtos.has(pIdx)) return { type: "Function", args: [], body: { type: "Block", body:[] } };
+            if (!cp || activeProtos.has(pIdx)) return { type: "Function", args:[], body: { type: "Block", body:[] } };
             if (cp.astNode) return cp.astNode;
             
             activeProtos.add(pIdx);
@@ -709,10 +726,10 @@ function process(base64str) {
         let finalAST = lift(allprotos[mainindex], allprotos, getProtoCode);
         finalAST = optimizeAST(finalAST);
         let finalCode = stringifyAST(finalAST, 0);
-        return finalCode.length > 0 ? finalCode : "";
+        return finalCode.length > 0 ? finalCode : "-- [MEGGD ENGINE DEBUG] Decompiled successfully, but AST output was empty.";
 
     } catch (e) {
-        return "";
+        return `--[MEGGD ENGINE CRASH]\n-- ${e.message}\n-- ${e.stack.split('\n').join('\n-- ')}`;
     }
 }
 
