@@ -1,17 +1,6 @@
 const bufferreader = require('./reader');
 const opcodes = require('./opcodes');
 
-const layouts =[];
-const permute = (arr, m =[]) => {
-    if (arr.length === 0) layouts.push(m);
-    else for (let i = 0; i < arr.length; i++) {
-        let curr = arr.slice();
-        let next = curr.splice(i, 1);
-        permute(curr, m.concat(next));
-    }
-};
-permute(["instrs", "consts", "protos", "debug"]);
-
 const aux_opcodes = new Set([
     "GETGLOBAL", "SETGLOBAL", "GETIMPORT", "GETTABLEKS", "SETTABLEKS", "NAMECALL",
     "JUMPIFEQ", "JUMPIFNOTEQ", "JUMPIFLE", "JUMPIFNOTLE", "JUMPIFLT", "JUMPIFNOTLT",
@@ -42,123 +31,141 @@ function formatK(k) {
     return { type: "Literal", value: k.v !== undefined ? k.v : "nil" };
 }
 
-function parseproto(r, strings, version, protoIdx, trace, layout, useTypeInfo, useUpvalueNames) {
+function parseproto(r, strings, version, typesversion) {
     let startOffset = r.offset;
     try {
         let maxstacksize = r.readbyte();
         let numparams = r.readbyte();
-        let numupvalues = r.readbyte();
+        let nups = r.readbyte();
         let isvararg = r.readbyte();
         
-        if (useTypeInfo && version >= 4) {
-            let typeinfoFlags = r.readbyte();
-            if (typeinfoFlags > 0) {
+        let flags = 0;
+        if (version >= 4) {
+            flags = r.readbyte();
+            if (typesversion === 1) {
                 let typesize = r.readvarint();
-                r.offset += typesize;
-            }
-            if (version >= 7) {
-                r.readvarint();
-                r.readvarint();
+                if (typesize > 0) r.offset += typesize;
+            } else if (typesversion === 2 || typesversion === 3) {
+                let typesize = r.readvarint();
+                if (typesize > 0) r.offset += typesize;
             }
         }
         
-        let p_instrs =[];
-        let p_consts =[];
-        let p_protos = [];
-        let p_locvars =[];
-        let p_upvalues =[];
-        let p_protoname = "anonymous";
-
-        for (let block of layout) {
-            if (block === "instrs") {
-                let instrcount = r.readvarint();
-                for (let i = 0; i < instrcount; i++) {
-                    p_instrs.push(r.readuint32());
-                }
-            } else if (block === "consts") {
-                let constcount = r.readvarint();
-                for (let i = 0; i < constcount; i++) {
-                    let type = r.readbyte();
-                    if (type === 0) p_consts.push({ t: 'nil', v: 'nil' });
-                    else if (type === 1) p_consts.push({ t: 'bool', v: r.readbyte() === 1 });
-                    else if (type === 2) { 
-                        if (r.offset + 8 > r.length) throw new Error("EOF");
-                        p_consts.push({ t: 'num', v: r.buffer.readDoubleLE(r.offset) }); 
-                        r.offset += 8; 
+        let sizecode = r.readvarint();
+        let instrs =[];
+        for (let i = 0; i < sizecode; i++) instrs.push(r.readuint32());
+        
+        let sizek = r.readvarint();
+        let consts =[];
+        for (let i = 0; i < sizek; i++) {
+            let type = r.readbyte();
+            switch(type) {
+                case 0: // LBC_CONSTANT_NIL
+                    consts.push({ t: 'nil', v: 'nil' });
+                    break;
+                case 1: // LBC_CONSTANT_BOOLEAN
+                    consts.push({ t: 'bool', v: r.readbyte() === 1 });
+                    break;
+                case 2: // LBC_CONSTANT_NUMBER
+                    consts.push({ t: 'num', v: r.buffer.readDoubleLE(r.offset) });
+                    r.offset += 8;
+                    break;
+                case 3: // LBC_CONSTANT_STRING
+                    consts.push({ t: 'str', v: strings[r.readvarint() - 1] || "" });
+                    break;
+                case 4: // LBC_CONSTANT_IMPORT
+                    let id = r.readuint32();
+                    let count = id >>> 30;
+                    let arr =[];
+                    let getval = (idx) => { 
+                        let c = consts[idx]; 
+                        if (!c) return `unk_${idx}`;
+                        if (c.t === 'str') return c.v;
+                        return formatKVal(c); 
+                    };
+                    if (count > 0) arr.push(getval((id >> 20) & 1023));
+                    if (count > 1) arr.push(getval((id >> 10) & 1023));
+                    if (count > 2) arr.push(getval(id & 1023));
+                    consts.push({ t: 'import', v: arr.join(".") });
+                    break;
+                case 5: // LBC_CONSTANT_TABLE
+                    let keys = r.readvarint();
+                    for (let j = 0; j < keys; j++) r.readvarint();
+                    consts.push({ t: 'table', v: '{}' });
+                    break;
+                case 6: // LBC_CONSTANT_CLOSURE
+                    consts.push({ t: 'closure', id: r.readvarint() });
+                    break;
+                case 7: // LBC_CONSTANT_VECTOR
+                    r.offset += 16;
+                    consts.push({ t: 'vector', v: 'Vector3.new()' });
+                    break;
+                case 8: // LBC_CONSTANT_CLOSURE_STATIC_DEPRECATED
+                    consts.push({ t: 'closure', id: r.readvarint() });
+                    break;
+                case 9: // LBC_CONSTANT_TABLE_WITH_CONSTANTS
+                    let numkeys = r.readvarint();
+                    for (let j = 0; j < numkeys; j++) {
+                        r.readvarint();
+                        r.offset += 4;
                     }
-                    else if (type === 3) p_consts.push({ t: 'str', v: strings[r.readvarint() - 1] || "" });
-                    else if (type === 4) {
-                        let id = r.readuint32();
-                        let count = id >>> 30;
-                        let arr =[];
-                        let getval = (idx) => { 
-                            let c = p_consts[idx]; 
-                            if (!c) return `unk_${idx}`;
-                            if (c.t === 'str') return c.v;
-                            return formatKVal(c); 
-                        };
-                        if (count > 0) arr.push(getval((id >> 20) & 1023));
-                        if (count > 1) arr.push(getval((id >> 10) & 1023));
-                        if (count > 2) arr.push(getval(id & 1023));
-                        p_consts.push({ t: 'import', v: arr.join(".") });
-                    }
-                    else if (type === 5) {
-                        let sz = r.readvarint();
-                        for(let j = 0; j < sz; j++) r.readvarint();
-                        p_consts.push({ t: 'table', v: '{}' });
-                    }
-                    else if (type === 6) p_consts.push({ t: 'closure', id: r.readvarint() });
-                    else if (type === 7) { r.offset += 16; p_consts.push({ t: 'vector', v: 'Vector3.new()' }); }
-                    else throw new Error("UNK");
-                }
-            } else if (block === "protos") {
-                let protocount = r.readvarint();
-                for (let i = 0; i < protocount; i++) {
-                    p_protos.push(r.readvarint());
-                }
-            } else if (block === "debug") {
-                let linedefined = r.readvarint();
-                let nameid = r.readvarint();
-                p_protoname = nameid > 0 ? strings[nameid - 1] || "anonymous" : "anonymous";
-                
-                let hasLineInfo = r.readbyte();
-                if (hasLineInfo !== 0) {
-                    let linegap = r.readbyte();
-                    let ic = p_instrs.length;
-                    let intervals = ic > 0 ? ((ic - 1) >> linegap) + 1 : 0;
-                    r.offset += ic + (intervals * 4);
-                }
-                
-                let hasDebugInfo = r.readbyte();
-                if (hasDebugInfo !== 0) {
-                    let locs = r.readvarint();
-                    for (let i = 0; i < locs; i++) {
-                        let n_id = r.readvarint();
-                        let startpc = r.readvarint();
-                        let endpc = r.readvarint();
-                        let reg = r.readbyte();
-                        p_locvars.push({ name: strings[n_id - 1] || "v" + reg, startpc, endpc, reg });
-                    }
-                    if (useUpvalueNames) {
-                        let upvs = r.readvarint();
-                        for (let i = 0; i < upvs; i++) {
-                            let n_id = r.readvarint();
-                            p_upvalues.push(strings[n_id - 1] || "upval_" + i);
-                        }
-                    }
-                }
+                    consts.push({ t: 'table', v: '{}' });
+                    break;
+                case 10: // LBC_CONSTANT_INTEGER
+                    let isNeg = r.readbyte() === 1;
+                    let mag = r.readvarint64();
+                    let valStr = mag.toString();
+                    consts.push({ t: 'num', v: isNeg ? "-" + valStr : valStr });
+                    break;
+                default:
+                    throw new Error(`Unknown const type ${type} at idx ${i}`);
+            }
+        }
+        
+        let sizep = r.readvarint();
+        let protos =[];
+        for (let i = 0; i < sizep; i++) protos.push(r.readvarint());
+        
+        let linedefined = r.readvarint();
+        let nameid = r.readvarint();
+        let protoname = nameid > 0 ? strings[nameid - 1] || "anonymous" : "anonymous";
+        
+        let hasLineInfo = r.readbyte();
+        if (hasLineInfo !== 0) {
+            let linegaplog2 = r.readbyte();
+            let intervals = ((sizecode - 1) >> linegaplog2) + 1;
+            r.offset += sizecode;
+            r.offset += intervals * 4;
+        }
+        
+        let hasDebugInfo = r.readbyte();
+        let locvars = [];
+        let upvalues =[];
+        if (hasDebugInfo !== 0) {
+            let sizelocvars = r.readvarint();
+            for (let i = 0; i < sizelocvars; i++) {
+                let n_id = r.readvarint();
+                let startpc = r.readvarint();
+                let endpc = r.readvarint();
+                let reg = r.readbyte();
+                locvars.push({ name: strings[n_id - 1] || "v" + reg, startpc, endpc, reg });
+            }
+            let sizeupvalues = r.readvarint();
+            for (let i = 0; i < sizeupvalues; i++) {
+                let n_id = r.readvarint();
+                upvalues.push(strings[n_id - 1] || "upval_" + i);
             }
         }
         
         return { 
             numparams, 
             isvararg, 
-            instrs: p_instrs, 
-            consts: p_consts, 
-            protos: p_protos, 
-            protoname: p_protoname, 
-            locvars: p_locvars, 
-            upvalues: p_upvalues, 
+            instrs, 
+            consts, 
+            protos, 
+            protoname, 
+            locvars, 
+            upvalues, 
             success: true, 
             parsed: r.offset - startOffset 
         };
@@ -185,7 +192,38 @@ function optimizeAST(node) {
                 return optimizeAST(node); 
             }
         }
-    } else if (node.type === "For" || node.type === "ForIn" || node.type === "Function" || node.type === "While") {
+        if (node.elseBody && node.body && node.body.body.length === 1 && node.elseBody.body.length === 1) {
+            let tStmt = node.body.body[0];
+            let eStmt = node.elseBody.body[0];
+            if ((tStmt.type === "Assignment" && eStmt.type === "Assignment") || 
+                (tStmt.type === "LocalAssignment" && eStmt.type === "LocalAssignment")) {
+                if (stringifyAST(tStmt.left, 0) === stringifyAST(eStmt.left, 0)) {
+                    return {
+                        type: tStmt.type,
+                        left: tStmt.left,
+                        right: {
+                            type: "BinaryExpression", op: "or",
+                            left: { type: "BinaryExpression", op: "and", left: node.cond, right: tStmt.right },
+                            right: eStmt.right
+                        }
+                    };
+                }
+            }
+        }
+    } else if (node.type === "While") {
+        node.body = optimizeAST(node.body);
+        if (node.cond && node.cond.value === "true" && node.body && node.body.body) {
+            let stmts = node.body.body;
+            if (stmts.length > 0) {
+                let lastStmt = stmts[stmts.length - 1];
+                if (lastStmt.type === "If" && !lastStmt.elseBody && lastStmt.body && lastStmt.body.body.length === 1 && lastStmt.body.body[0].type === "Break") {
+                    node.type = "Repeat";
+                    node.cond = lastStmt.cond; 
+                    stmts.pop(); 
+                }
+            }
+        }
+    } else if (node.type === "For" || node.type === "ForIn" || node.type === "Function") {
         node.body = optimizeAST(node.body);
     } else if (node.type === "LocalAssignment" || node.type === "Assignment") {
         if (node.right && node.right.type === "Function") {
@@ -239,6 +277,7 @@ function stringifyAST(node, ind) {
             return out;
         }
         case "While": return `${p}while ${stringifyAST(node.cond, 0)} do\n${stringifyAST(node.body, ind+1)}\n${p}end`;
+        case "Repeat": return `${p}repeat\n${stringifyAST(node.body, ind+1)}\n${p}until ${stringifyAST(node.cond, 0)}`;
         case "For": return `${p}for ${node.vars} = ${stringifyAST(node.start, 0)}, ${stringifyAST(node.end, 0)}${node.step ? ", " + stringifyAST(node.step, 0) : ""} do\n${stringifyAST(node.body, ind+1)}\n${p}end`;
         case "ForIn": 
             let iterStr = node.iterFunc ? `${node.iterFunc}(${stringifyAST(node.iters, 0)})` : stringifyAST(node.iters, 0);
@@ -250,7 +289,12 @@ function stringifyAST(node, ind) {
             if (node.entries && node.entries.length > 0) {
                 let props = node.entries.map(e => {
                     let valStr = stringifyAST(e.value, ind+1);
-                    return e.isBracket ? `[${stringifyAST(e.key, 0)}] = ${valStr}` : `${e.key} = ${valStr}`;
+                    if (e.isBracket) {
+                        if (typeof e.key === "string") return `["${e.key}"] = ${valStr}`;
+                        return `[${stringifyAST(e.key, 0)}] = ${valStr}`;
+                    } else {
+                        return `${e.key} = ${valStr}`;
+                    }
                 });
                 return `{\n${p}    ${props.join(`,\n${p}    `)}\n${p}}`;
             }
@@ -450,7 +494,7 @@ function lift(p, allprotos, getProtoCode) {
                 else body.push({ type: "Assignment", left: { type: "Index", obj: getR(b, pc), prop: getR(c, pc) }, right: getR(a, pc) });
             }
             else if (opname === "SETTABLEKS") {
-                if (regs[b] && regs[b].type === "Table") regs[b].entries.push({ key: formatKVal(auxVal), value: getR(a, pc), isBracket: false });
+                if (regs[b] && regs[b].type === "Table") regs[b].entries.push({ key: formatKVal(auxVal), value: getR(a, pc), isBracket: true });
                 else body.push({ type: "Assignment", left: { type: "IndexProp", obj: getR(b, pc), prop: formatKVal(auxVal) }, right: getR(a, pc) });
             }
             else if (opname === "SETTABLEN") {
@@ -577,6 +621,19 @@ function process(base64str) {
         let buf = Buffer.from(base64str, 'base64');
         let r = new bufferreader(buf);
         
+        r.readvarint64 = function() {
+            let result = 0n;
+            let shift = 0n;
+            let byte;
+            do {
+                if (this.offset >= this.length) break;
+                byte = BigInt(this.buffer.readUInt8(this.offset++));
+                result |= (byte & 127n) << shift;
+                shift += 7n;
+            } while (byte & 128n);
+            return result;
+        };
+        
         let ob = r.readbyte;
         r.readbyte = function() {
             if (this.offset >= this.length) throw new Error("EOF");
@@ -594,108 +651,45 @@ function process(base64str) {
         };
 
         let version = r.readbyte();
-        if (version < 3 || version > 7) {
+        if (version === 0) return "-- [MEGGD ENGINE DEBUG]\n-- Bytecode format version is 0 (error message).";
+        if (version < 3 || version > 9) {
             return `-- [MEGGD ENGINE DEBUG]\n-- Unsupported Luau bytecode version: ${version}`;
         }
         
-        let savedGlobalOffset = r.offset;
-        let globalActionFlagOptions = (version >= 4) ? [true, false] : [false];
+        let typesversion = 0;
+        if (version >= 4) {
+            typesversion = r.readbyte();
+        }
         
-        let structuralOptions =[
-            { typeinfo: false, upvalues: false },
-            { typeinfo: false, upvalues: true },
-            { typeinfo: true,  upvalues: false },
-            { typeinfo: true,  upvalues: true }
-        ];
-
-        let found = false;
+        let stringcount = r.readvarint();
+        let strings =[];
+        for (let i = 0; i < stringcount; i++) {
+            let slen = r.readvarint();
+            if (slen > r.length) throw new Error("String bound");
+            strings.push(r.readstring(slen));
+        }
+        
+        if (typesversion === 3) {
+            let index = r.readbyte();
+            while (index !== 0) {
+                r.readvarint(); 
+                index = r.readbyte();
+            }
+        }
+        
+        let protocount = r.readvarint();
         let allprotos =[];
-        let mainindex = 0;
-
-        for (let useGlobalActionFlag of globalActionFlagOptions) {
-            r.offset = savedGlobalOffset;
-            if (useGlobalActionFlag) r.readbyte();
-
-            try {
-                let stringcount = r.readvarint();
-                if (stringcount > 100000) continue; 
-
-                let strings =[];
-                for (let i = 0; i < stringcount; i++) {
-                    let slen = r.readvarint();
-                    if (slen > r.length) break;
-                    strings.push(r.readstring(slen));
-                }
-                
-                let originalStringsLength = strings.length;
-                let savedStringsOffset = r.offset;
-
-                for (let lIdx = 0; lIdx < layouts.length; lIdx++) {
-                    let layout = layouts[lIdx];
-                    for (let opt of structuralOptions) {
-                        for (let extraStrings = 0; extraStrings <= 15; extraStrings++) {
-                            r.offset = savedStringsOffset;
-                            strings.length = originalStringsLength;
-                            
-                            let extraSuccess = true;
-                            try {
-                                for(let k = 0; k < extraStrings; k++) {
-                                    let slen = r.readvarint();
-                                    if (slen > r.length) throw new Error("String bound");
-                                    strings.push(r.readstring(slen));
-                                }
-                            } catch(e) {
-                                extraSuccess = false;
-                            }
-                            if (!extraSuccess) continue;
-                            
-                            try {
-                                let protocount = r.readvarint();
-                                let tempProtos =[];
-                                let pSuccess = true;
-                                let protoErrors =[];
-                                
-                                for (let i = 0; i < protocount; i++) {
-                                    let p = parseproto(r, strings, version, i,[], layout, opt.typeinfo, opt.upvalues);
-                                    if (!p.success) {
-                                        pSuccess = false;
-                                        protoErrors.push(`Proto ${i} error: ${p.error}`);
-                                        break;
-                                    }
-                                    tempProtos.push(p);
-                                }
-                                
-                                if (pSuccess) {
-                                    let mIdx = r.readvarint();
-                                    if (mIdx >= 0 && mIdx < protocount && tempProtos[mIdx] && tempProtos[mIdx].instrs.length > 0) {
-                                        let firstOp = tempProtos[mIdx].instrs[0] & 0xFF;
-                                        if (opcodes[firstOp] && !opcodes[firstOp].includes("UNKNOWN")) {
-                                            allprotos = tempProtos;
-                                            mainindex = mIdx;
-                                            found = true;
-                                            break;
-                                        } else {
-                                            debugLog.push(`Potential match found, but first opcode ${firstOp} is unknown.`);
-                                        }
-                                    } else {
-                                        debugLog.push(`Main proto index out of bounds: ${mIdx}`);
-                                    }
-                                } else {
-                                    debugLog.push(`[${layout.join(',')}] extra: ${extraStrings} | ${protoErrors[0]}`);
-                                }
-                            } catch (e) {}
-                        }
-                        if (found) break;
-                    }
-                    if (found) break;
-                }
-            } catch (e) {}
-            if (found) break;
+        
+        for (let i = 0; i < protocount; i++) {
+            let p = parseproto(r, strings, version, typesversion);
+            if (!p.success) {
+                debugLog.push(`Proto ${i} error: ${p.error} at offset ${p.offset}`);
+                return `--[MEGGD ENGINE DEBUG]\n-- Failed to match bytecode structure.\n-- ` + debugLog.join('\n-- ');
+            }
+            allprotos.push(p);
         }
-
-        if (!found) {
-            return `--[MEGGD ENGINE DEBUG]\n-- Failed to match bytecode structure.\n-- ` + debugLog.slice(-10).join('\n-- ');
-        }
+        
+        let mainindex = r.readvarint();
         
         let activeProtos = new Set();
         let getProtoCode = (pIdx) => {
