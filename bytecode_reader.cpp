@@ -97,59 +97,115 @@ bool BytecodeReader::readFunctionProto(FunctionProto& func, uint32_t index, bool
     func.isVararg = read<uint8_t>();
     func.flags = read<uint8_t>();
 
-    uint32_t numInstr = readCount(isWire);
-    if (numInstr > 500000) {
-        lastError = "Function " + std::to_string(index) + ": too many instructions (" + std::to_string(numInstr) + ") at offset " + std::to_string(offset);
-        return false;
-    }
-    if (offset + numInstr * sizeof(uint32_t) > data.size()) {
-        lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in instructions at offset " + std::to_string(offset);
-        return false;
-    }
-    func.instructions.resize(numInstr);
-    for (uint32_t j = 0; j < numInstr; ++j)
-        func.instructions[j] = read<uint32_t>();
+    if (isWire) {
+        uint32_t numStrings = readVarInt();
+        func.kString.resize(numStrings);
+        for (uint32_t j = 0; j < numStrings; ++j) {
+            func.kString[j] = readString(true);
+            if (!lastError.empty()) return false;
+        }
 
-    uint32_t numNumbers = readCount(isWire);
-    if (offset + numNumbers * sizeof(double) > data.size()) {
-        lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in numbers at offset " + std::to_string(offset);
-        return false;
-    }
-    func.kNumber.resize(numNumbers);
-    for (uint32_t j = 0; j < numNumbers; ++j)
-        func.kNumber[j] = read<double>();
+        uint32_t numNumbers = readVarInt();
+        if (offset + numNumbers * sizeof(double) > data.size()) {
+            lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in numbers at offset " + std::to_string(offset);
+            return false;
+        }
+        func.kNumber.resize(numNumbers);
+        for (uint32_t j = 0; j < numNumbers; ++j)
+            func.kNumber[j] = read<double>();
 
-    uint32_t numInts = readCount(isWire);
-    if (offset + numInts * sizeof(int64_t) > data.size()) {
-        lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in integers at offset " + std::to_string(offset);
-        return false;
-    }
-    func.kInteger.resize(numInts);
-    for (uint32_t j = 0; j < numInts; ++j)
-        func.kInteger[j] = read<int64_t>();
+        uint32_t numInts = readVarInt();
+        if (offset + numInts * sizeof(int64_t) > data.size()) {
+            lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in integers at offset " + std::to_string(offset);
+            return false;
+        }
+        func.kInteger.resize(numInts);
+        for (uint32_t j = 0; j < numInts; ++j)
+            func.kInteger[j] = read<int64_t>();
 
-    uint32_t numStrings = readCount(isWire);
-    func.kString.resize(numStrings);
-    for (uint32_t j = 0; j < numStrings; ++j) {
-        func.kString[j] = readString(isWire);
-        if (!lastError.empty()) return false;
-    }
+        uint32_t numInstr = readVarInt();
+        if (numInstr > 500000) {
+            lastError = "Function " + std::to_string(index) + ": too many instructions (" + std::to_string(numInstr) + ") at offset " + std::to_string(offset);
+            return false;
+        }
+        if (offset + numInstr * sizeof(uint32_t) > data.size()) {
+            lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in instructions at offset " + std::to_string(offset);
+            return false;
+        }
+        func.instructions.resize(numInstr);
+        for (uint32_t j = 0; j < numInstr; ++j)
+            func.instructions[j] = read<uint32_t>();
 
-    uint32_t numProtos = readCount(isWire);
-    if (offset + numProtos * sizeof(uint32_t) > data.size()) {
-        lastError = "Function " + std::to_string(index) + ": unexpected end in protos at offset " + std::to_string(offset);
-        return false;
-    }
-    func.protoIds.resize(numProtos);
-    for (uint32_t j = 0; j < numProtos; ++j)
-        func.protoIds[j] = read<uint32_t>();
+        uint32_t numProtos = readVarInt();
+        if (offset + numProtos * sizeof(uint32_t) > data.size()) {
+            lastError = "Function " + std::to_string(index) + ": unexpected end in protos at offset " + std::to_string(offset);
+            return false;
+        }
+        func.protoIds.resize(numProtos);
+        for (uint32_t j = 0; j < numProtos; ++j)
+            func.protoIds[j] = read<uint32_t>();
 
-    uint32_t lineCount = readCount(isWire);
-    if (offset + lineCount * sizeof(int32_t) > data.size()) {
-        lastError = "Function " + std::to_string(index) + ": unexpected end in line info at offset " + std::to_string(offset);
-        return false;
+        uint32_t lineCount = readVarInt();
+        if (offset + lineCount * sizeof(int32_t) > data.size()) {
+            lastError = "Function " + std::to_string(index) + ": unexpected end in line info at offset " + std::to_string(offset);
+            return false;
+        }
+        offset += lineCount * sizeof(int32_t);
+    } else {
+        uint32_t numInstr = read<uint32_t>();
+        if (numInstr > 500000) {
+            lastError = "Function " + std::to_string(index) + ": too many instructions (" + std::to_string(numInstr) + ") at offset " + std::to_string(offset);
+            return false;
+        }
+        if (offset + numInstr * sizeof(uint32_t) > data.size()) {
+            lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in instructions at offset " + std::to_string(offset);
+            return false;
+        }
+        func.instructions.resize(numInstr);
+        for (uint32_t j = 0; j < numInstr; ++j)
+            func.instructions[j] = read<uint32_t>();
+
+        uint32_t numNumbers = read<uint32_t>();
+        if (offset + numNumbers * sizeof(double) > data.size()) {
+            lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in numbers at offset " + std::to_string(offset);
+            return false;
+        }
+        func.kNumber.resize(numNumbers);
+        for (uint32_t j = 0; j < numNumbers; ++j)
+            func.kNumber[j] = read<double>();
+
+        uint32_t numInts = read<uint32_t>();
+        if (offset + numInts * sizeof(int64_t) > data.size()) {
+            lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in integers at offset " + std::to_string(offset);
+            return false;
+        }
+        func.kInteger.resize(numInts);
+        for (uint32_t j = 0; j < numInts; ++j)
+            func.kInteger[j] = read<int64_t>();
+
+        uint32_t numStrings = read<uint32_t>();
+        func.kString.resize(numStrings);
+        for (uint32_t j = 0; j < numStrings; ++j) {
+            func.kString[j] = readString(false);
+            if (!lastError.empty()) return false;
+        }
+
+        uint32_t numProtos = read<uint32_t>();
+        if (offset + numProtos * sizeof(uint32_t) > data.size()) {
+            lastError = "Function " + std::to_string(index) + ": unexpected end in protos at offset " + std::to_string(offset);
+            return false;
+        }
+        func.protoIds.resize(numProtos);
+        for (uint32_t j = 0; j < numProtos; ++j)
+            func.protoIds[j] = read<uint32_t>();
+
+        uint32_t lineCount = read<uint32_t>();
+        if (offset + lineCount * sizeof(int32_t) > data.size()) {
+            lastError = "Function " + std::to_string(index) + ": unexpected end in line info at offset " + std::to_string(offset);
+            return false;
+        }
+        offset += lineCount * sizeof(int32_t);
     }
-    offset += lineCount * sizeof(int32_t);
     return true;
 }
 
