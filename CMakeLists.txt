@@ -9,6 +9,9 @@ include_directories(${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/luau ${CMAKE_SOURCE_
 add_executable(luau-decompiler
     main.cpp
     bytecode_reader.cpp
+    cfg.cpp
+    structurizer.cpp
+    codewriter.cpp
     disassembler.cpp
 )
 
