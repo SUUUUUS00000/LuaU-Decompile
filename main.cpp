@@ -35,8 +35,10 @@ int main() {
 
             BytecodeReader reader;
             if (!reader.load(bytecode_vec)) {
+                std::string error_msg = "Failed to parse bytecode: " + reader.getLastError();
+                std::cerr << error_msg << std::endl;
                 res.status = 500;
-                res.set_content("Failed to parse bytecode", "text/plain");
+                res.set_content(error_msg, "text/plain");
                 return;
             }
 
