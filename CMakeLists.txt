@@ -12,7 +12,6 @@ add_executable(luau-decompiler
     cfg.cpp
     structurizer.cpp
     codewriter.cpp
-    disassembler.cpp
 )
 
 find_package(Threads REQUIRED)
