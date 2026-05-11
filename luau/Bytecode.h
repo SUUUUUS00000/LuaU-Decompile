@@ -1,4 +1,4 @@
-// luau/Bytecode.h (обновленный)
+// luau/Bytecode.h
 #pragma once
 
 // clang-format off
