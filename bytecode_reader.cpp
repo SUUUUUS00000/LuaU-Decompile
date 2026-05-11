@@ -58,6 +58,10 @@ bool BytecodeReader::parseBytecode() {
         func.protoIds.resize(numProtos);
         for (uint32_t j = 0; j < numProtos; ++j)
             func.protoIds[j] = read<uint32_t>();
+
+        uint32_t lineCount = read<uint32_t>();
+        offset += lineCount * sizeof(int32_t);
+
         functions[i] = std::move(func);
     }
     return true;
@@ -68,9 +72,4 @@ std::string BytecodeReader::readString() {
     std::string s(reinterpret_cast<const char*>(&data[offset]), len);
     offset += len;
     return s;
-}
-
-const BytecodeReader::FunctionProto* BytecodeReader::getFunction(uint32_t id) const {
-    if (id < functions.size()) return &functions[id];
-    return nullptr;
 }
