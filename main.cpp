@@ -11,8 +11,14 @@ using json = nlohmann::json;
 int main() {
     httplib::Server svr;
 
+    svr.Get("/", [](const httplib::Request &req, httplib::Response &res) {
+        res.set_content("Luau Decompiler API is running. Send POST to /decompile", "text/plain");
+    });
+
     svr.Post("/decompile", [](const httplib::Request &req, httplib::Response &res) {
         try {
+            std::cout << "Received decompile request" << std::endl;
+
             json body = json::parse(req.body);
             if (!body.contains("script")) {
                 res.status = 400;
@@ -39,12 +45,13 @@ int main() {
 
             res.set_content(result, "text/plain");
         } catch (const std::exception &e) {
+            std::cerr << "Error: " << e.what() << std::endl;
             res.status = 500;
             res.set_content(std::string("Error: ") + e.what(), "text/plain");
         }
     });
 
-    std::cout << "Luau Decompiler server running on http://localhost:8080\n";
+    std::cout << "Luau Decompiler server running on http://localhost:8080" << std::endl;
     svr.listen("0.0.0.0", 8080);
     return 0;
 }
