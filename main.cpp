@@ -31,8 +31,6 @@ int main() {
 
     svr.Post("/decompile", [](const httplib::Request &req, httplib::Response &res) {
         try {
-            std::cout << "Received decompile request" << std::endl;
-
             json body = json::parse(req.body);
             if (!body.contains("script")) {
                 res.status = 400;
@@ -51,20 +49,20 @@ int main() {
             if (!reader.load(bytecode_vec)) {
                 std::string error_msg = "Failed to parse bytecode: " + reader.getLastError() +
                                         ". First bytes: " + hexdump(bytecode_vec, 32);
-                std::cerr << error_msg << std::endl;
                 res.status = 500;
                 res.set_content(error_msg, "text/plain");
                 return;
             }
 
             std::string result;
-            for (uint32_t i = 0; i < reader.getFunction(reader.getMainFunctionId())->protoIds.size() + 1; ++i) {
-                auto* func = reader.getFunction(i);
-                if (!func) continue;
-                Structurizer structurizer(*func, reader);
+            const BytecodeReader::FunctionProto* mainFunc = reader.getFunction(reader.getMainFunctionId());
+            if (mainFunc) {
+                Structurizer structurizer(*mainFunc, reader);
                 auto ast = structurizer.structurize();
                 CodeWriter writer;
-                result += writer.generate(*ast) + "\n";
+                result = writer.generate(*ast);
+            } else {
+                result = "-- no main function";
             }
 
             res.set_content(result, "text/plain");
