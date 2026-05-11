@@ -38,6 +38,7 @@ private:
     std::string lastError;
 
     bool parseBytecode();
+    bool readFunctionProto(FunctionProto& func, uint32_t index);
     template<typename T> T read();
     std::string readString();
 };
