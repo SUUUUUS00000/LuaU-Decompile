@@ -5,8 +5,21 @@
 #include "bytecode_reader.h"
 #include "disassembler.h"
 #include <iostream>
+#include <sstream>
+#include <iomanip>
 
 using json = nlohmann::json;
+
+std::string hexdump(const std::vector<uint8_t>& data, size_t max_len) {
+    std::ostringstream oss;
+    size_t n = std::min(data.size(), max_len);
+    for (size_t i = 0; i < n; ++i) {
+        oss << std::hex << std::uppercase << std::setw(2) << std::setfill('0') 
+            << (int)data[i] << " ";
+    }
+    if (data.size() > max_len) oss << "...";
+    return oss.str();
+}
 
 int main() {
     httplib::Server svr;
@@ -35,7 +48,8 @@ int main() {
 
             BytecodeReader reader;
             if (!reader.load(bytecode_vec)) {
-                std::string error_msg = "Failed to parse bytecode: " + reader.getLastError();
+                std::string error_msg = "Failed to parse bytecode: " + reader.getLastError() +
+                                        ". First bytes: " + hexdump(bytecode_vec, 32);
                 std::cerr << error_msg << std::endl;
                 res.status = 500;
                 res.set_content(error_msg, "text/plain");
