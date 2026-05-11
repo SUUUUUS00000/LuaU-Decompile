@@ -2,7 +2,6 @@
 #pragma once
 #include <vector>
 #include <cstdint>
-#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -17,6 +16,12 @@ class ControlFlowGraph {
 public:
     void build(const std::vector<uint32_t>& instructions);
     const std::vector<BasicBlock>& blocks() const { return m_blocks; }
+    size_t numBlocks() const { return m_blocks.size(); }
+    const BasicBlock& block(size_t idx) const { return m_blocks[idx]; }
 private:
     std::vector<BasicBlock> m_blocks;
+    std::unordered_set<uint32_t> leaders;
+    void findLeaders(const std::vector<uint32_t>& instructions);
+    void buildBlocks(const std::vector<uint32_t>& instructions);
+    void computeEdges(const std::vector<uint32_t>& instructions);
 };
