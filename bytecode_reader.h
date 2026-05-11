@@ -25,6 +25,8 @@ public:
     uint32_t getMainFunctionId() const { return mainFuncId; }
     uint8_t getVersion() const { return version; }
     uint8_t getFlags() const { return flags; }
+    std::string getLastError() const { return lastError; }
+    size_t getOffset() const { return offset; }
 
 private:
     std::vector<uint8_t> data;
@@ -33,6 +35,7 @@ private:
     uint8_t version = 0;
     uint8_t flags = 0;
     size_t offset = 0;
+    std::string lastError;
 
     bool parseBytecode();
     template<typename T> T read();
@@ -40,6 +43,10 @@ private:
 };
 
 template<typename T> T BytecodeReader::read() {
+    if (offset + sizeof(T) > data.size()) {
+        lastError = "Unexpected end of bytecode at offset " + std::to_string(offset);
+        return T();
+    }
     T val = *reinterpret_cast<const T*>(&data[offset]);
     offset += sizeof(T);
     return val;
