@@ -3,7 +3,8 @@
 #include "external/json.hpp"
 #include "base64.h"
 #include "bytecode_reader.h"
-#include "disassembler.h"
+#include "structurizer.h"
+#include "codewriter.h"
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -56,8 +57,15 @@ int main() {
                 return;
             }
 
-            Disassembler dis(reader);
-            std::string result = dis.disassemble();
+            std::string result;
+            for (uint32_t i = 0; i < reader.getFunction(reader.getMainFunctionId())->protoIds.size() + 1; ++i) {
+                auto* func = reader.getFunction(i);
+                if (!func) continue;
+                Structurizer structurizer(*func, reader);
+                auto ast = structurizer.structurize();
+                CodeWriter writer;
+                result += writer.generate(*ast) + "\n";
+            }
 
             res.set_content(result, "text/plain");
         } catch (const std::exception &e) {
