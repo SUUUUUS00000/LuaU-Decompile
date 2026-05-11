@@ -73,3 +73,8 @@ std::string BytecodeReader::readString() {
     offset += len;
     return s;
 }
+
+const BytecodeReader::FunctionProto* BytecodeReader::getFunction(uint32_t id) const {
+    if (id < functions.size()) return &functions[id];
+    return nullptr;
+}
