@@ -38,9 +38,12 @@ private:
     std::string lastError;
 
     bool parseBytecode();
-    bool readFunctionProto(FunctionProto& func, uint32_t index);
+    bool parseWireFormat();
+    bool readFunctionProto(FunctionProto& func, uint32_t index, bool isWire);
     template<typename T> T read();
-    std::string readString();
+    std::string readString(bool isWire);
+    uint32_t readVarInt();
+    uint32_t readCount(bool isWire);
 };
 
 template<typename T> T BytecodeReader::read() {
