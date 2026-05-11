@@ -1,7 +1,6 @@
 // bytecode_reader.cpp
 #include "bytecode_reader.h"
 #include <fstream>
-#include <stdexcept>
 #include <cstring>
 
 bool BytecodeReader::load(const std::vector<uint8_t>& bytecode) {
@@ -27,90 +26,113 @@ bool BytecodeReader::load(const std::string& filepath) {
 }
 
 bool BytecodeReader::parseBytecode() {
-    if (data.size() < 5 + 1 + 1 + 4 + 4) {
+    if (data.size() < 5) {
         lastError = "Bytecode too small (size " + std::to_string(data.size()) + ")";
         return false;
     }
     const char LUAU_SIGNATURE[] = "\0Lua\x81";
-    if (memcmp(data.data(), LUAU_SIGNATURE, 5) != 0) {
-        lastError = "Invalid signature at offset 0";
+    bool hasSignature = (memcmp(data.data(), LUAU_SIGNATURE, 5) == 0);
+
+    if (hasSignature) {
+        offset = 5;
+        version = read<uint8_t>();
+        flags = read<uint8_t>();
+        mainFuncId = read<uint32_t>();
+        uint32_t numFunctions = read<uint32_t>();
+        if (numFunctions == 0) {
+            lastError = "No functions in bytecode";
+            return false;
+        }
+        functions.resize(numFunctions);
+        for (uint32_t i = 0; i < numFunctions; ++i) {
+            FunctionProto func;
+            if (!readFunctionProto(func, i)) return false;
+            functions[i] = std::move(func);
+        }
+    } else {
+        version = 0;
+        flags = 0;
+        mainFuncId = 0;
+        offset = 0;
+        functions.resize(1);
+        if (!readFunctionProto(functions[0], 0)) {
+            lastError = "Failed to parse as raw function dump: " + lastError;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool BytecodeReader::readFunctionProto(FunctionProto& func, uint32_t index) {
+    if (offset + 5 > data.size()) {
+        lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in header at offset " + std::to_string(offset);
         return false;
     }
-    offset = 5;
-    version = read<uint8_t>();
-    flags = read<uint8_t>();
-    mainFuncId = read<uint32_t>();
-    uint32_t numFunctions = read<uint32_t>();
-    if (numFunctions == 0) {
-        lastError = "No functions in bytecode";
+    func.maxStackSize = read<uint8_t>();
+    func.numParams = read<uint8_t>();
+    func.numUpvals = read<uint8_t>();
+    func.isVararg = read<uint8_t>();
+    func.flags = read<uint8_t>();
+
+    uint32_t numInstr = read<uint32_t>();
+    if (offset + numInstr * sizeof(uint32_t) > data.size()) {
+        lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in instructions at offset " + std::to_string(offset);
         return false;
     }
-    functions.resize(numFunctions);
-    for (uint32_t i = 0; i < numFunctions; ++i) {
-        FunctionProto func;
-        func.maxStackSize = read<uint8_t>();
-        func.numParams = read<uint8_t>();
-        func.numUpvals = read<uint8_t>();
-        func.isVararg = read<uint8_t>();
-        func.flags = read<uint8_t>();
-        uint32_t numInstr = read<uint32_t>();
-        if (offset + numInstr * sizeof(uint32_t) > data.size()) {
-            lastError = "Function " + std::to_string(i) + ": unexpected end of bytecode in instructions at offset " + std::to_string(offset);
-            return false;
-        }
-        func.instructions.resize(numInstr);
-        for (uint32_t j = 0; j < numInstr; ++j)
-            func.instructions[j] = read<uint32_t>();
-        uint32_t numNumbers = read<uint32_t>();
-        if (offset + numNumbers * sizeof(double) > data.size()) {
-            lastError = "Function " + std::to_string(i) + ": unexpected end of bytecode in numbers at offset " + std::to_string(offset);
-            return false;
-        }
-        func.kNumber.resize(numNumbers);
-        for (uint32_t j = 0; j < numNumbers; ++j)
-            func.kNumber[j] = read<double>();
-        uint32_t numInts = read<uint32_t>();
-        if (offset + numInts * sizeof(int64_t) > data.size()) {
-            lastError = "Function " + std::to_string(i) + ": unexpected end of bytecode in integers at offset " + std::to_string(offset);
-            return false;
-        }
-        func.kInteger.resize(numInts);
-        for (uint32_t j = 0; j < numInts; ++j)
-            func.kInteger[j] = read<int64_t>();
-        uint32_t numStrings = read<uint32_t>();
-        func.kString.resize(numStrings);
-        for (uint32_t j = 0; j < numStrings; ++j) {
-            if (offset + sizeof(uint32_t) > data.size()) {
-                lastError = "Function " + std::to_string(i) + ": unexpected end of bytecode in string length at offset " + std::to_string(offset);
-                return false;
-            }
-            func.kString[j] = readString();
-        }
-        uint32_t numProtos = read<uint32_t>();
-        if (offset + numProtos * sizeof(uint32_t) > data.size()) {
-            lastError = "Function " + std::to_string(i) + ": unexpected end of bytecode in protos at offset " + std::to_string(offset);
-            return false;
-        }
-        func.protoIds.resize(numProtos);
-        for (uint32_t j = 0; j < numProtos; ++j)
-            func.protoIds[j] = read<uint32_t>();
+    func.instructions.resize(numInstr);
+    for (uint32_t j = 0; j < numInstr; ++j)
+        func.instructions[j] = read<uint32_t>();
 
-        uint32_t lineCount = read<uint32_t>();
-        if (offset + lineCount * sizeof(int32_t) > data.size()) {
-            lastError = "Function " + std::to_string(i) + ": unexpected end of bytecode in line info at offset " + std::to_string(offset);
-            return false;
-        }
-        offset += lineCount * sizeof(int32_t);
-
-        functions[i] = std::move(func);
+    uint32_t numNumbers = read<uint32_t>();
+    if (offset + numNumbers * sizeof(double) > data.size()) {
+        lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in numbers at offset " + std::to_string(offset);
+        return false;
     }
+    func.kNumber.resize(numNumbers);
+    for (uint32_t j = 0; j < numNumbers; ++j)
+        func.kNumber[j] = read<double>();
+
+    uint32_t numInts = read<uint32_t>();
+    if (offset + numInts * sizeof(int64_t) > data.size()) {
+        lastError = "Function " + std::to_string(index) + ": unexpected end of bytecode in integers at offset " + std::to_string(offset);
+        return false;
+    }
+    func.kInteger.resize(numInts);
+    for (uint32_t j = 0; j < numInts; ++j)
+        func.kInteger[j] = read<int64_t>();
+
+    uint32_t numStrings = read<uint32_t>();
+    func.kString.resize(numStrings);
+    for (uint32_t j = 0; j < numStrings; ++j) {
+        if (offset + sizeof(uint32_t) > data.size()) {
+            lastError = "Function " + std::to_string(index) + ": unexpected end in string length at offset " + std::to_string(offset);
+            return false;
+        }
+        func.kString[j] = readString();
+    }
+
+    uint32_t numProtos = read<uint32_t>();
+    if (offset + numProtos * sizeof(uint32_t) > data.size()) {
+        lastError = "Function " + std::to_string(index) + ": unexpected end in protos at offset " + std::to_string(offset);
+        return false;
+    }
+    func.protoIds.resize(numProtos);
+    for (uint32_t j = 0; j < numProtos; ++j)
+        func.protoIds[j] = read<uint32_t>();
+
+    uint32_t lineCount = read<uint32_t>();
+    if (offset + lineCount * sizeof(int32_t) > data.size()) {
+        lastError = "Function " + std::to_string(index) + ": unexpected end in line info at offset " + std::to_string(offset);
+        return false;
+    }
+    offset += lineCount * sizeof(int32_t);
     return true;
 }
 
 std::string BytecodeReader::readString() {
     uint32_t len = read<uint32_t>();
     if (offset + len > data.size()) {
-        lastError = "Unexpected end of bytecode in string data at offset " + std::to_string(offset);
+        lastError = "Unexpected end in string data at offset " + std::to_string(offset);
         return {};
     }
     std::string s(reinterpret_cast<const char*>(&data[offset]), len);
